@@ -1,0 +1,13 @@
+/build/
+/build-*/
+/deps-src/
+/compile_commands.json
+/CMakeUserPresets.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+*.swp
+*~

@@ -1,0 +1,13 @@
+	Command being timed: "fixture"
+	User time (seconds): 12.50
+	System time (seconds): 1.25
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:14.00
+	Maximum resident set size (kbytes): 123456
+	Major (requiring I/O) page faults: 2
+	Minor (reclaiming a frame) page faults: 100
+	Voluntary context switches: 9
+	Involuntary context switches: 3
+	File system inputs: 8
+	File system outputs: 16
+	Exit status: 0
