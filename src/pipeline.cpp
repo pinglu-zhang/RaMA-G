@@ -9,6 +9,8 @@
 #include "ramag/seqpro_adapter.hpp"
 #include "ramag/sufkit_adapter.hpp"
 
+#include "extension_backend.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -995,6 +997,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     manifest.index_route = std::move(index_route);
     manifest.seeding_route = std::move(seeding_route);
     manifest.chaining_route = result.statistics.chaining_route;
+    manifest.extension_route = internal::ConfiguredExtensionRoute();
     manifest.input_parallel_route = std::move(input_parallel_route);
     manifest.input_requested_workers = input_requested_workers;
     manifest.input_actual_workers = input_actual_workers;

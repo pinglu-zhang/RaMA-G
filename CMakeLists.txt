@@ -49,6 +49,40 @@ option(RAMAG_ENABLE_PINNED_DEPENDENCIES
 set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
     "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
+# Compile-time-only experimental gap-extension selection.  The default scalar
+# build deliberately resolves neither KSW2 nor Rust/Block Aligner, so ordinary
+# RaMA-G users retain the existing dependency and runtime contract.
+set(RAMAG_INTERNAL_EXTENSION_BACKEND "scalar" CACHE STRING
+    "Internal extension backend: scalar, ksw2-exact, ksw2-band-auto, block-exact, or block-adaptive")
+set_property(CACHE RAMAG_INTERNAL_EXTENSION_BACKEND PROPERTY STRINGS
+             scalar ksw2-exact ksw2-band-auto block-exact block-adaptive)
+set(RAMAG_KSW2_COMMIT "289609bd9e5381a13b16239d0a7703f1ff03f9ca"
+    CACHE STRING "Required KSW2 commit for experimental extension backends")
+set(RAMAG_KSW2_SOURCE_DIR "" CACHE PATH "Clean KSW2 source override")
+set(RAMAG_BLOCK_ALIGNER_COMMIT "4fcf630cf775de5b578fe63971f210e1dc958791"
+    CACHE STRING "Required Block Aligner commit for experimental extension backends")
+set(RAMAG_BLOCK_ALIGNER_SOURCE_DIR "" CACHE PATH "Clean Block Aligner source override")
+set(RAMAG_BLOCK_ALIGNER_SIMD "sse2" CACHE STRING
+    "Block Aligner SIMD implementation for internal experiments: sse2 or avx2")
+set_property(CACHE RAMAG_BLOCK_ALIGNER_SIMD PROPERTY STRINGS sse2 avx2)
+set(RAMAG_BLOCK_ALIGNER_RUST_TOOLCHAIN "nightly-2024-06-22" CACHE STRING
+    "Pinned Rust toolchain used for the experimental Block Aligner C ABI")
+set(RAMAG_BLOCK_ALIGNER_RUSTUP_HOME "" CACHE PATH
+    "Isolated RUSTUP_HOME containing the pinned Block Aligner toolchain")
+set(RAMAG_BLOCK_ALIGNER_CARGO_HOME "" CACHE PATH
+    "Optional isolated CARGO_HOME for Block Aligner (defaults inside the build tree)")
+option(RAMAG_INTERNAL_EXTENSION_METRICS
+       "Collect per-call experimental extension timing and work estimates" OFF)
+option(RAMAG_BUILD_EXTENSION_BENCHMARK
+       "Build the internal deterministic gap-extension benchmark" OFF)
+mark_as_advanced(
+  RAMAG_INTERNAL_EXTENSION_BACKEND
+  RAMAG_KSW2_COMMIT RAMAG_KSW2_SOURCE_DIR
+  RAMAG_BLOCK_ALIGNER_COMMIT RAMAG_BLOCK_ALIGNER_SOURCE_DIR
+  RAMAG_BLOCK_ALIGNER_SIMD RAMAG_BLOCK_ALIGNER_RUST_TOOLCHAIN
+  RAMAG_BLOCK_ALIGNER_RUSTUP_HOME RAMAG_BLOCK_ALIGNER_CARGO_HOME
+  RAMAG_INTERNAL_EXTENSION_METRICS RAMAG_BUILD_EXTENSION_BENCHMARK)
+
 set(RAMAG_SUFKIT_COMMIT "bdb67c6de5daddd8a005640de73d96549d2575f4"
     CACHE STRING "Required sufkit commit")
 set(RAMAG_SEQPRO_COMMIT "6781cadcf81a0da53d7573444594c1484947017c"
@@ -60,7 +94,8 @@ set(RAMAG_SEQPRO_SOURCE_DIR "" CACHE PATH "Clean SeqPro source override")
 # accept branch names, moving tags, abbreviated object names, or mixed-case
 # spellings that could make manifest/string equality ambiguous.
 foreach(_ramag_dependency_commit IN ITEMS
-    RAMAG_SUFKIT_COMMIT RAMAG_SEQPRO_COMMIT)
+    RAMAG_SUFKIT_COMMIT RAMAG_SEQPRO_COMMIT
+    RAMAG_KSW2_COMMIT RAMAG_BLOCK_ALIGNER_COMMIT)
   string(LENGTH "${${_ramag_dependency_commit}}"
          _ramag_dependency_commit_length)
   if(NOT _ramag_dependency_commit_length EQUAL 40 OR
@@ -70,6 +105,20 @@ foreach(_ramag_dependency_commit IN ITEMS
       "Git commit, got '${${_ramag_dependency_commit}}'")
   endif()
 endforeach()
+
+set(_ramag_extension_backends
+    scalar ksw2-exact ksw2-band-auto block-exact block-adaptive)
+if(NOT RAMAG_INTERNAL_EXTENSION_BACKEND IN_LIST _ramag_extension_backends)
+  message(FATAL_ERROR
+    "RAMAG_INTERNAL_EXTENSION_BACKEND must be one of: ${_ramag_extension_backends}; "
+    "got '${RAMAG_INTERNAL_EXTENSION_BACKEND}'")
+endif()
+if(NOT RAMAG_BLOCK_ALIGNER_SIMD STREQUAL "sse2" AND
+   NOT RAMAG_BLOCK_ALIGNER_SIMD STREQUAL "avx2")
+  message(FATAL_ERROR
+    "RAMAG_BLOCK_ALIGNER_SIMD must be sse2 or avx2, got "
+    "'${RAMAG_BLOCK_ALIGNER_SIMD}'")
+endif()
 
 if(MSVC)
   string(APPEND RAMAG_EFFECTIVE_CXX_FLAGS " cxx_std_20 /W4 /permissive-")
@@ -99,6 +148,9 @@ if(RAMAG_ENABLE_PINNED_DEPENDENCIES)
   FetchContent_GetProperties(sufkit SOURCE_DIR RAMAG_RESOLVED_SUFKIT_SOURCE_DIR)
   FetchContent_GetProperties(seqpro SOURCE_DIR RAMAG_RESOLVED_SEQPRO_SOURCE_DIR)
 endif()
+
+include(RaMAExtensionBackends)
+ramag_configure_extension_backend()
 
 function(ramag_apply_project_warnings target)
   if(MSVC)
@@ -133,6 +185,7 @@ endif()
 add_library(ramag_core
   src/alignment.cpp
   src/cli.cpp
+  src/extension_backend.cpp
   src/fasta.cpp
   src/manifest.cpp
   src/pipeline.cpp
@@ -159,6 +212,9 @@ target_compile_definitions(
     RAMAG_GIT_COMMIT="${RAMAG_GIT_COMMIT}"
     RAMAG_SUFKIT_COMMIT="${RAMAG_SUFKIT_COMMIT}"
     RAMAG_SEQPRO_COMMIT="${RAMAG_SEQPRO_COMMIT}"
+    RAMAG_EXTENSION_BACKEND="${RAMAG_INTERNAL_EXTENSION_BACKEND}"
+    RAMAG_KSW2_COMMIT="${RAMAG_KSW2_COMMIT}"
+    RAMAG_BLOCK_ALIGNER_COMMIT="${RAMAG_BLOCK_ALIGNER_COMMIT}"
   PRIVATE
     RAMAG_CXX_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
     RAMAG_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
@@ -167,6 +223,15 @@ target_compile_definitions(
     RAMAG_OPENMP_RUNTIME="${RAMAG_OPENMP_RUNTIME_NAME}"
     RAMAG_OPENMP_SPEC_DATE=${OpenMP_CXX_SPEC_DATE}
     RAMAG_SUFKIT_DIVSUFSORT_OPENMP=${RAMAG_SUFKIT_DIVSUFSORT_OPENMP_VALUE})
+
+if(RAMAG_INTERNAL_EXTENSION_METRICS OR
+   NOT RAMAG_INTERNAL_EXTENSION_BACKEND STREQUAL "scalar")
+  target_compile_definitions(ramag_core PRIVATE RAMAG_EXTENSION_METRICS=1)
+else()
+  target_compile_definitions(ramag_core PRIVATE RAMAG_EXTENSION_METRICS=0)
+endif()
+
+ramag_link_extension_backend(ramag_core)
 
 # Keep OpenMP target-scoped to RaMA-G.  In particular, do not mutate global
 # compiler flags or silently change MUMmer4/other comparison binaries.
@@ -201,6 +266,13 @@ endif()
 add_executable(ramag src/main.cpp)
 target_link_libraries(ramag PRIVATE RaMA-G::core)
 ramag_apply_project_warnings(ramag)
+
+if(RAMAG_BUILD_EXTENSION_BENCHMARK)
+  add_executable(ramag_extension_benchmark
+                 benchmarks/extension_benchmark.cpp)
+  target_link_libraries(ramag_extension_benchmark PRIVATE RaMA-G::core)
+  ramag_apply_project_warnings(ramag_extension_benchmark)
+endif()
 
 install(TARGETS ramag RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag")

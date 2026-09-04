@@ -50,8 +50,9 @@ struct AlignmentOptions {
     Length min_cluster{65};
     Length break_length{200};
 
-    // Maximum number of cells in one scalar gap-DP matrix.  A seed edge that
-    // would exceed this bound is not chained, so no unbounded matrix is built.
+    // Maximum number of full-matrix cells admitted for one gap-DP problem. A
+    // seed edge that would exceed this bound is not chained, regardless of the
+    // compile-time internal extension backend.
     std::uint64_t max_dp_cells{4'000'000};
 
     std::int32_t match_score{2};
@@ -106,8 +107,8 @@ void ResolveAlignmentRecords(
 
 // Deterministic baseline genome-to-genome alignment.  It partitions seeds by
 // contig pair/strand, performs bounded monotone chaining, aligns intervening
-// gaps with exact/ungapped fast paths or scalar affine DP, and marks one stable
-// primary record per query contig.
+// gaps with exact/ungapped fast paths or the compile-time affine-DP backend,
+// and marks one stable primary record per query contig.
 [[nodiscard]] AlignmentResult AlignGenomes(
     const std::vector<SequenceRecord>& references,
     const std::vector<SequenceRecord>& queries,
@@ -135,6 +136,48 @@ void ResolveAlignmentRecords(
 // retained quadratic oracle.  Production alignment always uses the sparse
 // route; callers cannot select the oracle as a fallback.
 namespace testing {
+
+struct ExtensionGapTestResult {
+    std::string backend;
+    std::vector<CigarOp> configured_cigar;
+    std::vector<CigarOp> scalar_cigar;
+    std::int64_t configured_score{};
+    std::int64_t scalar_score{};
+    std::uint64_t estimated_cells{};
+    std::uint64_t full_matrix_cells{};
+    std::uint64_t effective_band_width{};
+    std::uint64_t effective_block_size{};
+};
+
+struct ConfiguredExtensionGapResult {
+    std::vector<CigarOp> cigar;
+    std::int64_t score{};
+    std::uint64_t estimated_cells{};
+    std::uint64_t full_matrix_cells{};
+    std::uint64_t effective_band_width{};
+    std::uint64_t effective_block_size{};
+};
+
+// Internal experiment hook.  Product alignment never selects a backend at
+// runtime; the configured implementation is fixed by CMake.  This hook keeps
+// the scalar oracle available for deterministic differential benchmarks.
+[[nodiscard]] ExtensionGapTestResult AlignExtensionGapForTesting(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options = {});
+
+[[nodiscard]] ConfiguredExtensionGapResult
+AlignConfiguredExtensionGapForTesting(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options = {});
+
+[[nodiscard]] Length Ksw2AutomaticBandWidthForTesting(
+    Length reference_length,
+    Length query_length,
+    const AlignmentOptions& options = {});
+
+[[nodiscard]] std::string ConfiguredExtensionBackendName();
 
 struct ChainingTestResult {
     std::vector<std::vector<Seed>> chains;

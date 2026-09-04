@@ -96,6 +96,151 @@ void WriteInput(std::ostringstream& output,
   output << "]\n    }" << (trailing_comma ? "," : "") << '\n';
 }
 
+std::string ExtensionDependencyFields() {
+#if defined(RAMAG_EXTENSION_SCALAR)
+  return "    \"ksw2_source\": \"not-linked; bounded-scalar-baseline\"\n";
+#elif defined(RAMAG_EXTENSION_KSW2_EXACT) || \
+    defined(RAMAG_EXTENSION_KSW2_BAND_AUTO)
+  return "    \"ksw2_commit\": " + Quote(RAMAG_KSW2_COMMIT) + ",\n" +
+         "    \"ksw2_source_path\": " +
+         Quote(RAMAG_EXTENSION_DEPENDENCY_SOURCE) + ",\n" +
+         "    \"block_aligner_source\": \"not-linked\"\n";
+#elif defined(RAMAG_EXTENSION_BLOCK_EXACT) || \
+    defined(RAMAG_EXTENSION_BLOCK_ADAPTIVE)
+  return "    \"block_aligner_commit\": " +
+         Quote(RAMAG_BLOCK_ALIGNER_COMMIT) + ",\n" +
+         "    \"block_aligner_source_path\": " +
+         Quote(RAMAG_EXTENSION_DEPENDENCY_SOURCE) + ",\n" +
+         "    \"ksw2_source\": \"not-linked\"\n";
+#else
+#error "An extension backend compile definition is required"
+#endif
+}
+
+std::string ExtensionRoutesJson(const ManifestData& data) {
+#if defined(RAMAG_EXTENSION_SCALAR)
+  static_cast<void>(data);
+  return "[\"exact\",\"ungapped\",\"bounded-scalar-dp\"]";
+#else
+  constexpr std::string_view prefix{"exact+ungapped+"};
+  const std::string_view route = data.extension_route.starts_with(prefix)
+                                     ? std::string_view{data.extension_route}.substr(
+                                           prefix.size())
+                                     : std::string_view{data.extension_route};
+  return "[\"exact\",\"ungapped\"," + Quote(route) + "]";
+#endif
+}
+
+std::string ExtensionCountFields(const RunStatistics& stats) {
+#if defined(RAMAG_EXTENSION_SCALAR)
+  return "    \"dp_extensions\": " +
+         std::to_string(stats.dp_gap_count) + "\n";
+#else
+  return "    \"dp_extensions\": " +
+         std::to_string(stats.dp_gap_count) + ",\n" +
+         "    \"extension_backend_calls\": " +
+         std::to_string(stats.extension_backend_gap_count) + "\n";
+#endif
+}
+
+#if !defined(RAMAG_EXTENSION_SCALAR)
+void WriteExperimentalExtension(std::ostringstream& output,
+                                const ManifestData& data) {
+  const auto& stats = data.statistics;
+  std::string dependency_name;
+  std::string dependency_commit;
+  std::string dependency_version;
+  std::string band_formula{"not-applicable"};
+  std::string block_policy{"not-applicable"};
+  std::string isa{"sse2"};
+#if defined(RAMAG_EXTENSION_KSW2_EXACT)
+  dependency_name = "KSW2";
+  dependency_commit = RAMAG_KSW2_COMMIT;
+  dependency_version = "upstream-snapshot";
+  band_formula = "full-matrix:w=-1";
+#elif defined(RAMAG_EXTENSION_KSW2_BAND_AUTO)
+  dependency_name = "KSW2";
+  dependency_commit = RAMAG_KSW2_COMMIT;
+  dependency_version = "upstream-snapshot";
+  band_formula =
+      "ksw2-auto-band-v1:min(s,max(d,ceil(diag_diff+diag_factor*s)))";
+  isa = "portable-c";
+#elif defined(RAMAG_EXTENSION_BLOCK_EXACT)
+  dependency_name = "Block Aligner";
+  dependency_commit = RAMAG_BLOCK_ALIGNER_COMMIT;
+  dependency_version = "0.5.0";
+  block_policy = "full-block:pow2(max(r+1,q+1)),min=32,max=16384";
+  isa = RAMAG_BLOCK_ALIGNER_SIMD;
+#elif defined(RAMAG_EXTENSION_BLOCK_ADAPTIVE)
+  dependency_name = "Block Aligner";
+  dependency_commit = RAMAG_BLOCK_ALIGNER_COMMIT;
+  dependency_version = "0.5.0";
+  block_policy = "adaptive:min=32,max=128";
+  isa = RAMAG_BLOCK_ALIGNER_SIMD;
+#endif
+  const double band_mean = stats.extension_band_call_count == 0
+                               ? 0.0
+                               : static_cast<double>(
+                                     stats.extension_band_width_sum) /
+                                     static_cast<double>(
+                                         stats.extension_band_call_count);
+  const double block_mean = stats.extension_block_call_count == 0
+                                ? 0.0
+                                : static_cast<double>(
+                                      stats.extension_block_size_sum) /
+                                      static_cast<double>(
+                                          stats.extension_block_call_count);
+  output << "  \"experimental_extension\": {\n"
+         << "    \"backend\": " << Quote(RAMAG_EXTENSION_BACKEND) << ",\n"
+         << "    \"dependency_name\": " << Quote(dependency_name) << ",\n"
+         << "    \"dependency_commit\": " << Quote(dependency_commit)
+         << ",\n"
+         << "    \"dependency_version_or_snapshot\": "
+         << Quote(dependency_version) << ",\n"
+         << "    \"dependency_source_path\": "
+         << Quote(RAMAG_EXTENSION_DEPENDENCY_SOURCE) << ",\n"
+         << "    \"scoring_contract\": {\"alphabet\":\"A/C/G/T/N\","
+            "\"match\":"
+         << data.run_spec.alignment.match_score << ",\"mismatch\":-"
+         << data.run_spec.alignment.mismatch_penalty << ",\"gap_open\":-"
+         << data.run_spec.alignment.gap_open_penalty
+         << ",\"gap_extend\":-"
+         << data.run_spec.alignment.gap_extend_penalty
+         << ",\"gap_cost\":\"-(open+k*extend)\",\"N_pair\":-"
+         << data.run_spec.alignment.mismatch_penalty << "},\n"
+         << "    \"band_formula\": " << Quote(band_formula) << ",\n"
+         << "    \"block_size_policy\": " << Quote(block_policy) << ",\n"
+         << "    \"compiler_and_isa\": "
+         << Quote(std::string{RAMAG_CXX_COMPILER} + ";" + isa) << ",\n";
+#if defined(RAMAG_EXTENSION_BLOCK_EXACT) || \
+    defined(RAMAG_EXTENSION_BLOCK_ADAPTIVE)
+  output << "    \"rust_toolchain\": "
+         << Quote(RAMAG_BLOCK_ALIGNER_RUST_TOOLCHAIN) << ",\n"
+         << "    \"rustc\": " << Quote(RAMAG_BLOCK_ALIGNER_RUSTC_VERSION)
+         << ",\n"
+         << "    \"cargo\": " << Quote(RAMAG_BLOCK_ALIGNER_CARGO_VERSION)
+         << ",\n";
+#endif
+  output << "    \"dp_calls\": " << stats.extension_backend_gap_count << ",\n"
+         << "    \"backend_failures\": 0,\n"
+         << "    \"dp_elapsed_seconds\": "
+         << stats.extension_backend_call_seconds << ",\n"
+         << "    \"estimated_cells\": "
+         << stats.extension_estimated_cells << ",\n"
+         << "    \"full_matrix_cells\": "
+         << stats.extension_full_matrix_cells << ",\n"
+         << "    \"effective_band_statistics\": {\"calls\":"
+         << stats.extension_band_call_count << ",\"min\":"
+         << stats.extension_band_width_min << ",\"mean\":" << band_mean
+         << ",\"max\":" << stats.extension_band_width_max << "},\n"
+         << "    \"effective_block_statistics\": {\"calls\":"
+         << stats.extension_block_call_count << ",\"min\":"
+         << stats.extension_block_size_min << ",\"mean\":" << block_mean
+         << ",\"max\":" << stats.extension_block_size_max << "}\n"
+         << "  },\n";
+}
+#endif
+
 }  // namespace
 
 std::string ManifestJson(const ManifestData& data) {
@@ -160,9 +305,12 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"seqpro_source_path\": " << Quote(RAMAG_SEQPRO_SOURCE_PATH)
          << ",\n"
          << "    \"dependency_mode\": " << Quote(RAMAG_DEPENDENCY_MODE) << ",\n"
-         << "    \"ksw2_source\": \"not-linked; bounded-scalar-baseline\"\n"
-         << "  },\n"
-         << "  \"effective_config\": {\n"
+         << ExtensionDependencyFields()
+         << "  },\n";
+#if !defined(RAMAG_EXTENSION_SCALAR)
+  WriteExperimentalExtension(output, data);
+#endif
+  output << "  \"effective_config\": {\n"
          << "    \"reference\": "
          << Quote(AbsolutePath(data.run_spec.reference_path)) << ",\n"
          << "    \"reference_index\": "
@@ -216,7 +364,7 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"index\": " << Quote(data.index_route) << ",\n"
          << "    \"seed\": " << Quote(data.seeding_route) << ",\n"
          << "    \"chain\": " << Quote(data.chaining_route) << ",\n"
-         << "    \"extension\": [\"exact\",\"ungapped\",\"bounded-scalar-dp\"]\n"
+         << "    \"extension\": " << ExtensionRoutesJson(data) << "\n"
          << "  },\n"
          << "  \"actual_routes\": {\n"
          << "    \"input\": " << Quote(data.input_route) << ",\n"
@@ -396,7 +544,7 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"exact_gaps\": " << stats.exact_gap_count << ",\n"
          << "    \"ungapped_extensions\": " << stats.ungapped_gap_count
          << ",\n"
-         << "    \"dp_extensions\": " << stats.dp_gap_count << "\n"
+         << ExtensionCountFields(stats)
          << "  },\n"
          << "  \"stage_wall_seconds\": {\n";
   std::size_t timing_index = 0;

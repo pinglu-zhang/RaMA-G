@@ -1,5 +1,7 @@
 #include "ramag/alignment.hpp"
 
+#include "extension_backend.hpp"
+
 #include "ramag/fasta.hpp"
 
 #include <algorithm>
@@ -1676,10 +1678,8 @@ void AppendCigar(std::vector<CigarOp>& cigar, char operation, Length length) {
     }
 }
 
-struct GapAlignment {
-    std::vector<CigarOp> cigar;
-    std::int64_t score{};
-};
+using internal::ExtensionCallMetrics;
+using internal::GapAlignment;
 
 [[nodiscard]] std::int64_t GapPenalty(Length length,
                                       const AlignmentOptions& options) {
@@ -1691,10 +1691,10 @@ struct GapAlignment {
     return -total;
 }
 
-[[nodiscard]] GapAlignment AlignAffineGap(std::string_view reference,
-                                          std::string_view query,
-                                          const AlignmentOptions& options,
-                                          bool force_affine = false) {
+[[nodiscard]] GapAlignment AlignScalarAffineGap(std::string_view reference,
+                                                std::string_view query,
+                                                const AlignmentOptions& options,
+                                                bool force_affine = false) {
     if (reference.empty()) {
         GapAlignment result;
         AppendCigar(result.cigar, 'I', static_cast<Length>(query.size()));
@@ -1870,6 +1870,132 @@ struct GapAlignment {
     return result;
 }
 
+[[nodiscard]] std::int64_t ValidateAndScoreGapAlignment(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options,
+    const GapAlignment& alignment) {
+    Position reference_offset = 0;
+    Position query_offset = 0;
+    std::int64_t score = 0;
+    char previous_operation = '\0';
+    for (const CigarOp& operation : alignment.cigar) {
+        if (operation.length == 0) {
+            throw AlignmentError("extension backend returned a zero-length CIGAR operation");
+        }
+        if (operation.operation == previous_operation) {
+            throw AlignmentError("extension backend returned a non-canonical CIGAR");
+        }
+        previous_operation = operation.operation;
+        if (operation.operation == '=' || operation.operation == 'X') {
+            const Position reference_end = CheckedEnd(
+                reference_offset, operation.length, "extension CIGAR reference");
+            const Position query_end = CheckedEnd(
+                query_offset, operation.length, "extension CIGAR query");
+            if (reference_end > reference.size() || query_end > query.size()) {
+                throw AlignmentError("extension backend CIGAR exceeds its input sequences");
+            }
+            for (Length offset = 0; offset < operation.length; ++offset) {
+                const bool equal = EqualCanonical(
+                    reference[static_cast<std::size_t>(reference_offset + offset)],
+                    query[static_cast<std::size_t>(query_offset + offset)]);
+                if ((operation.operation == '=') != equal) {
+                    throw AlignmentError(
+                        "extension backend CIGAR disagrees with canonical bases");
+                }
+                score = CheckedScoreAdd(
+                    score,
+                    equal ? static_cast<std::int64_t>(options.match_score)
+                          : -static_cast<std::int64_t>(options.mismatch_penalty),
+                    "extension backend score");
+            }
+            reference_offset = reference_end;
+            query_offset = query_end;
+        } else if (operation.operation == 'I') {
+            query_offset = CheckedEnd(
+                query_offset, operation.length, "extension CIGAR query insertion");
+            if (query_offset > query.size()) {
+                throw AlignmentError("extension backend insertion exceeds the query");
+            }
+            score = CheckedScoreAdd(
+                score, GapPenalty(operation.length, options),
+                "extension backend insertion score");
+        } else if (operation.operation == 'D') {
+            reference_offset = CheckedEnd(
+                reference_offset, operation.length, "extension CIGAR reference deletion");
+            if (reference_offset > reference.size()) {
+                throw AlignmentError("extension backend deletion exceeds the reference");
+            }
+            score = CheckedScoreAdd(
+                score, GapPenalty(operation.length, options),
+                "extension backend deletion score");
+        } else {
+            throw AlignmentError("extension backend returned an unsupported CIGAR operation");
+        }
+    }
+    if (reference_offset != reference.size() || query_offset != query.size()) {
+        throw AlignmentError("extension backend CIGAR does not consume both sequences");
+    }
+    if (score != alignment.score) {
+        throw AlignmentError(
+            "extension backend score disagrees with its CIGAR: reported=" +
+            std::to_string(alignment.score) + ", recomputed=" +
+            std::to_string(score) + ", cigar=" + CigarToString(alignment.cigar));
+    }
+    return score;
+}
+
+[[nodiscard]] GapAlignment AlignConfiguredUnequalGap(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options,
+    ExtensionCallMetrics* metrics) {
+    if (reference.empty() || query.empty() || reference.size() == query.size()) {
+        throw AlignmentError(
+            "internal error: experimental backend requires non-empty unequal gaps");
+    }
+#if defined(RAMAG_EXTENSION_KSW2_EXACT)
+    GapAlignment result = internal::AlignKsw2Gap(
+        reference, query, options, false, metrics);
+#elif defined(RAMAG_EXTENSION_KSW2_BAND_AUTO)
+    GapAlignment result = internal::AlignKsw2Gap(
+        reference, query, options, true, metrics);
+#elif defined(RAMAG_EXTENSION_BLOCK_EXACT)
+    GapAlignment result = internal::AlignBlockGap(
+        reference, query, options, true, metrics);
+#elif defined(RAMAG_EXTENSION_BLOCK_ADAPTIVE)
+    GapAlignment result = internal::AlignBlockGap(
+        reference, query, options, false, metrics);
+#else
+    GapAlignment result = AlignScalarAffineGap(reference, query, options, true);
+    if (metrics != nullptr) {
+        const std::uint64_t rows = static_cast<std::uint64_t>(reference.size()) + 1;
+        const std::uint64_t columns = static_cast<std::uint64_t>(query.size()) + 1;
+        metrics->full_matrix_cells = rows * columns;
+        metrics->estimated_cells = metrics->full_matrix_cells;
+    }
+#endif
+    static_cast<void>(ValidateAndScoreGapAlignment(
+        reference, query, options, result));
+    return result;
+}
+
+[[nodiscard]] GapAlignment AlignAffineGap(std::string_view reference,
+                                          std::string_view query,
+                                          const AlignmentOptions& options,
+                                          bool force_affine,
+                                          ExtensionCallMetrics* metrics) {
+#if defined(RAMAG_EXTENSION_SCALAR) && !RAMAG_EXTENSION_METRICS
+    static_cast<void>(metrics);
+    return AlignScalarAffineGap(reference, query, options, force_affine);
+#else
+    if (reference.empty() || query.empty() || reference.size() == query.size()) {
+        return AlignScalarAffineGap(reference, query, options, force_affine);
+    }
+    return AlignConfiguredUnequalGap(reference, query, options, metrics);
+#endif
+}
+
 [[nodiscard]] bool ShouldRealignEqualGap(std::string_view reference,
                                         std::string_view query,
                                         const AlignmentOptions& options) noexcept {
@@ -1915,6 +2041,18 @@ struct alignas(64) GapCountAccumulator {
     std::uint64_t exact{};
     std::uint64_t ungapped{};
     std::uint64_t dp{};
+    std::uint64_t backend_calls{};
+    std::uint64_t estimated_cells{};
+    std::uint64_t full_matrix_cells{};
+    std::uint64_t band_calls{};
+    std::uint64_t band_sum{};
+    std::uint64_t band_min{};
+    std::uint64_t band_max{};
+    std::uint64_t block_calls{};
+    std::uint64_t block_sum{};
+    std::uint64_t block_min{};
+    std::uint64_t block_max{};
+    double backend_seconds{};
     bool processed{};
 };
 
@@ -2025,9 +2163,60 @@ struct alignas(64) GapCountAccumulator {
                 ++statistics.dp;
             }
 
-            GapAlignment gap =
-                AlignAffineGap(reference_gap_bases, query_gap_bases, options,
-                               realign_equal);
+#if RAMAG_EXTENSION_METRICS || !defined(RAMAG_EXTENSION_SCALAR)
+            ExtensionCallMetrics call_metrics;
+#if RAMAG_EXTENSION_METRICS
+            const Clock::time_point backend_begin = Clock::now();
+#endif
+#endif
+            GapAlignment gap = AlignAffineGap(
+                reference_gap_bases, query_gap_bases, options,
+                realign_equal,
+#if RAMAG_EXTENSION_METRICS || !defined(RAMAG_EXTENSION_SCALAR)
+                &call_metrics);
+#else
+                nullptr);
+#endif
+#if RAMAG_EXTENSION_METRICS || !defined(RAMAG_EXTENSION_SCALAR)
+            if (!reference_gap_bases.empty() && !query_gap_bases.empty() &&
+                reference_gap_bases.size() != query_gap_bases.size()) {
+                ++statistics.backend_calls;
+                CheckedAggregate(statistics.estimated_cells,
+                                 call_metrics.estimated_cells,
+                                 "extension estimated cell count");
+                CheckedAggregate(statistics.full_matrix_cells,
+                                 call_metrics.full_matrix_cells,
+                                 "extension full matrix cell count");
+                if (call_metrics.effective_band_width != 0) {
+                    ++statistics.band_calls;
+                    CheckedAggregate(statistics.band_sum,
+                                     call_metrics.effective_band_width,
+                                     "extension band width sum");
+                    statistics.band_min = statistics.band_min == 0
+                                              ? call_metrics.effective_band_width
+                                              : std::min(statistics.band_min,
+                                                         call_metrics.effective_band_width);
+                    statistics.band_max = std::max(
+                        statistics.band_max, call_metrics.effective_band_width);
+                }
+                if (call_metrics.effective_block_size != 0) {
+                    ++statistics.block_calls;
+                    CheckedAggregate(statistics.block_sum,
+                                     call_metrics.effective_block_size,
+                                     "extension block size sum");
+                    statistics.block_min = statistics.block_min == 0
+                                               ? call_metrics.effective_block_size
+                                               : std::min(statistics.block_min,
+                                                          call_metrics.effective_block_size);
+                    statistics.block_max = std::max(
+                        statistics.block_max, call_metrics.effective_block_size);
+                }
+#if RAMAG_EXTENSION_METRICS
+                statistics.backend_seconds +=
+                    SecondsBetween(backend_begin, Clock::now());
+#endif
+            }
+#endif
             for (const CigarOp& operation : gap.cigar) {
                 AppendCigar(alignment.cigar, operation.operation, operation.length);
             }
@@ -2495,6 +2684,41 @@ void ValidateExternalSeeds(const std::vector<Seed>& seeds,
                          local.ungapped, "ungapped gap count");
         CheckedAggregate(result.statistics.dp_gap_count,
                          local.dp, "DP gap count");
+        CheckedAggregate(result.statistics.extension_backend_gap_count,
+                         local.backend_calls, "extension backend gap count");
+        CheckedAggregate(result.statistics.extension_estimated_cells,
+                         local.estimated_cells, "extension estimated cells");
+        CheckedAggregate(result.statistics.extension_full_matrix_cells,
+                         local.full_matrix_cells,
+                         "extension full matrix cells");
+        CheckedAggregate(result.statistics.extension_band_call_count,
+                         local.band_calls, "extension band call count");
+        CheckedAggregate(result.statistics.extension_band_width_sum,
+                         local.band_sum, "extension band width sum");
+        CheckedAggregate(result.statistics.extension_block_call_count,
+                         local.block_calls, "extension block call count");
+        CheckedAggregate(result.statistics.extension_block_size_sum,
+                         local.block_sum, "extension block size sum");
+        if (local.band_min != 0) {
+            result.statistics.extension_band_width_min =
+                result.statistics.extension_band_width_min == 0
+                    ? local.band_min
+                    : std::min(result.statistics.extension_band_width_min,
+                               local.band_min);
+            result.statistics.extension_band_width_max = std::max(
+                result.statistics.extension_band_width_max, local.band_max);
+        }
+        if (local.block_min != 0) {
+            result.statistics.extension_block_size_min =
+                result.statistics.extension_block_size_min == 0
+                    ? local.block_min
+                    : std::min(result.statistics.extension_block_size_min,
+                               local.block_min);
+            result.statistics.extension_block_size_max = std::max(
+                result.statistics.extension_block_size_max, local.block_max);
+        }
+        result.statistics.extension_backend_call_seconds +=
+            local.backend_seconds;
     }
     const Clock::time_point chain_end = Clock::now();
     result.statistics.chain_and_extension_seconds =
@@ -2851,6 +3075,66 @@ namespace {
 }
 
 }  // namespace
+
+ExtensionGapTestResult AlignExtensionGapForTesting(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options) {
+    ValidateOptions(options);
+    if (reference.empty() || query.empty() || reference.size() == query.size()) {
+        throw AlignmentError(
+            "extension differential testing requires non-empty unequal gaps");
+    }
+    ExtensionCallMetrics metrics;
+    const GapAlignment configured = AlignConfiguredUnequalGap(
+        reference, query, options, &metrics);
+    const GapAlignment scalar = AlignScalarAffineGap(
+        reference, query, options, true);
+    static_cast<void>(ValidateAndScoreGapAlignment(
+        reference, query, options, scalar));
+    return ExtensionGapTestResult{
+        RAMAG_EXTENSION_BACKEND,
+        configured.cigar,
+        scalar.cigar,
+        configured.score,
+        scalar.score,
+        metrics.estimated_cells,
+        metrics.full_matrix_cells,
+        metrics.effective_band_width,
+        metrics.effective_block_size};
+}
+
+ConfiguredExtensionGapResult AlignConfiguredExtensionGapForTesting(
+    std::string_view reference,
+    std::string_view query,
+    const AlignmentOptions& options) {
+    ValidateOptions(options);
+    if (reference.empty() || query.empty() || reference.size() == query.size()) {
+        throw AlignmentError(
+            "extension benchmarking requires non-empty unequal gaps");
+    }
+    ExtensionCallMetrics metrics;
+    GapAlignment configured = AlignConfiguredUnequalGap(
+        reference, query, options, &metrics);
+    return ConfiguredExtensionGapResult{
+        std::move(configured.cigar), configured.score,
+        metrics.estimated_cells, metrics.full_matrix_cells,
+        metrics.effective_band_width,
+        metrics.effective_block_size};
+}
+
+Length Ksw2AutomaticBandWidthForTesting(
+    Length reference_length,
+    Length query_length,
+    const AlignmentOptions& options) {
+    ValidateOptions(options);
+    return internal::Ksw2AutomaticBandWidth(
+        reference_length, query_length, options);
+}
+
+std::string ConfiguredExtensionBackendName() {
+    return std::string{internal::ConfiguredExtensionBackend()};
+}
 
 ChainingTestResult BuildSparseChainsForTesting(
     std::span<const Seed> seeds,

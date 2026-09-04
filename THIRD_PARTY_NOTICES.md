@@ -20,7 +20,44 @@ linked into RaMA-G. minibwa commit
 MIT-compatible-code source only. Its optional GPL-2.0 `bwtgen` component is
 explicitly excluded from RaMA-G.
 
-KSW2 is planned as the optimized gap-extension implementation. Until that
-adapter and its source notice are added, RaMA-G uses its own bounded scalar
-dynamic-programming baseline. A future KSW2 import must retain the upstream
-copyright and MIT notice in this file and in the vendored source directory.
+Optional compile-time-only extension experiments use the following separately
+fetched MIT-licensed implementations. Neither is linked by the default scalar
+build:
+
+- **KSW2**, commit `289609bd9e5381a13b16239d0a7703f1ff03f9ca`,
+  copyright Dana-Farber Cancer Institute and Broad Institute, Inc. The upstream
+  MIT license applies to the selected `ksw2_extz2_sse.c` and `ksw2_gg.c`
+  implementations.
+- **Block Aligner**, commit
+  `4fcf630cf775de5b578fe63971f210e1dc958791`, copyright Daniel Liu. The
+  upstream MIT license applies to its Rust implementation and C ABI.
+
+RaMA-G keeps its bounded scalar dynamic-programming implementation as the
+default. Selecting either experimental dependency requires an explicit
+`RAMAG_INTERNAL_EXTENSION_BACKEND` CMake value and does not add a public CLI
+backend switch.
+
+Their common MIT license text is reproduced below with both upstream copyright
+notices:
+
+> Copyright (c) 2018- Dana-Farber Cancer Institute<br>
+> Copyright (c) 2017-2018 Broad Institute, Inc.<br>
+> Copyright (c) 2021 Daniel Liu
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

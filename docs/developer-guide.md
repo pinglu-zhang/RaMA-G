@@ -319,7 +319,29 @@ segments become `=` operations. Intervening regions use three paths:
 
 1. an exact-string fast path when the two gaps are identical;
 2. an ungapped path for suitable equal-length gaps, emitting `=` and `X`;
-3. bounded scalar affine-gap dynamic programming for the remaining gaps.
+3. bounded affine-gap dynamic programming for the remaining gaps.
+
+The default build uses RaMA-G's scalar implementation. For controlled internal
+experiments, `RAMAG_INTERNAL_EXTENSION_BACKEND` can compile one fixed backend
+into a separate binary: `scalar`, `ksw2-exact`, `ksw2-band-auto`,
+`block-exact`, or `block-adaptive`. This cache variable is intentionally not a
+public run-time option. Exact/ungapped fast paths and equal-length realignment
+remain on the scalar route; only non-empty, unequal gaps enter an experimental
+adapter, and an adapter failure aborts the run rather than falling back.
+
+KSW2 exact uses the global affine-gap SSE2 `extz2` implementation over the full
+matrix. The automatic-band build uses `ksw2-auto-band-v1`, derived directly
+from the chaining diagonal tolerance, with KSW2's standard global `gg`
+implementation. The latter route is deliberate: at the pinned revision,
+`extz2_sse` can report a banded global score whose traceback does not realize
+that score when the optimum leaves a narrow band. RaMA-G therefore uses the
+portable KSW2 global implementation whose DP and traceback enforce the same
+band, rather than weakening CIGAR validation or silently widening/retrying.
+Block Aligner is built through its C ABI with the pinned Rust toolchain. Its
+exact build uses a power-of-two block covering the complete matrix, while its
+adaptive build uses a 32-to-128 block range. All adapters explicitly score
+`N`, including `N/N`, as a mismatch and convert traceback to canonical
+`=/X/I/D` operations.
 
 The current scoring scheme is match `+2`, mismatch `-4`, gap open `-4`, and
 gap extension `-2`. The public tuning interface does not currently expose
@@ -336,8 +358,9 @@ while the resulting interval is converted back to forward coordinates.
 
 Adjacent identical CIGAR operations are coalesced. The constructor then checks
 reference/query consumption, span closure, score, edit distance, and sequence
-agreement for every `=`/`X` column. KSW2 and other external extension engines
-are not active in this implementation.
+agreement for every `=`/`X` column. The same checks apply to scalar, KSW2, and
+Block Aligner tracebacks, so an external backend cannot silently return a
+partial or differently scored record.
 
 ## 10. Conflict resolution and selection
 
@@ -500,7 +523,8 @@ The implementation boundary is currently:
 - one reference multi-FASTA and one query multi-FASTA per align run;
 - in-memory normalized genomes and a full standalone reference suffix array;
 - the five documented exact-seed modes;
-- bounded scalar affine-gap extension;
+- bounded scalar affine-gap extension by default, with compile-time-only KSW2
+  and Block Aligner experiment builds;
 - `all` or reciprocal interval-based `one-to-one` record selection;
 - SAM, PAF, delta, pairwise MAF, and UCSC chain serialization;
 - transactional output, provenance, progress, and cooperative interruption;

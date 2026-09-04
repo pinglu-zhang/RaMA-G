@@ -103,6 +103,18 @@ struct RunStatistics {
     std::uint64_t exact_gap_count{};
     std::uint64_t ungapped_gap_count{};
     std::uint64_t dp_gap_count{};
+    std::uint64_t extension_backend_gap_count{};
+    std::uint64_t extension_estimated_cells{};
+    std::uint64_t extension_full_matrix_cells{};
+    std::uint64_t extension_band_call_count{};
+    std::uint64_t extension_band_width_sum{};
+    std::uint64_t extension_band_width_min{};
+    std::uint64_t extension_band_width_max{};
+    std::uint64_t extension_block_call_count{};
+    std::uint64_t extension_block_size_sum{};
+    std::uint64_t extension_block_size_min{};
+    std::uint64_t extension_block_size_max{};
+    double extension_backend_call_seconds{};
 
     std::uint32_t seed_requested_threads{1};
     std::uint32_t seed_scheduled_threads{1};
