@@ -160,7 +160,11 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"seqpro_source_path\": " << Quote(RAMAG_SEQPRO_SOURCE_PATH)
          << ",\n"
          << "    \"dependency_mode\": " << Quote(RAMAG_DEPENDENCY_MODE) << ",\n"
+#if RAMAG_USE_PAIRWISE_CORE
+         << "    \"ksw2_source\": \"7d08359e0df7f7e6ffcfe67217c3399761cb2129:src/align/ksw2_extz2_sse.c\"\n"
+#else
          << "    \"ksw2_source\": \"not-linked; bounded-scalar-baseline\"\n"
+#endif
          << "  },\n"
          << "  \"effective_config\": {\n"
          << "    \"reference\": "
@@ -216,7 +220,16 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"index\": " << Quote(data.index_route) << ",\n"
          << "    \"seed\": " << Quote(data.seeding_route) << ",\n"
          << "    \"chain\": " << Quote(data.chaining_route) << ",\n"
+#if RAMAG_USE_PAIRWISE_CORE
+         << "    \"extension\": [\"pairwise-certified-global-ksw2\",\"pairwise-endpoint-extension\"],\n"
+         << "    \"alignment_core\": \"pairwise\",\n"
+         << "    \"source_commit\": \"7d08359e0df7f7e6ffcfe67217c3399761cb2129\",\n"
+         << "    \"semantic_exceptions\": [\"signed-coordinate-arithmetic\",\"floating-point-dp-best\"],\n"
+         << "    \"scoring_contract\": \"scaled-HOXD70;open=40;extend=3;N=mismatch\",\n"
+         << "    \"selection_contract\": \"pairwise-dual-dp-intersection;all=pre-selection-records\"\n"
+#else
          << "    \"extension\": [\"exact\",\"ungapped\",\"bounded-scalar-dp\"]\n"
+#endif
          << "  },\n"
          << "  \"actual_routes\": {\n"
          << "    \"input\": " << Quote(data.input_route) << ",\n"

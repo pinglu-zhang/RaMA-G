@@ -20,11 +20,12 @@ struct ReferenceIndexPaths {
 [[nodiscard]] ReferenceIndexPaths RunReferenceIndexPipeline(
     const IndexSpec& spec,
     std::string invocation,
-    const std::filesystem::path& binary_path);
+    const std::filesystem::path& binary_path,
+    const CpuAffinityInfo& launch_affinity);
 
 // Require the RaMA-G companion manifest/marker and bind them to the supplied
 // normalized reference before Sufkit loads the index payload.
-void ValidateReferenceIndexBundle(const std::filesystem::path& index,
+std::string ValidateReferenceIndexBundle(const std::filesystem::path& index,
                                   const FastaData& reference);
 
 }  // namespace ramag

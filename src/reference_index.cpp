@@ -146,15 +146,20 @@ ReferenceIndexPaths MakeReferenceIndexPaths(const std::filesystem::path& index) 
           std::filesystem::path(index.string() + ".complete")};
 }
 
-void ValidateReferenceIndexBundle(const std::filesystem::path& index,
+std::string ValidateReferenceIndexBundle(const std::filesystem::path& index,
                                   const FastaData& reference) {
   const auto paths = MakeReferenceIndexPaths(index);
   const auto manifest = ReadText(paths.manifest);
   const auto complete = ReadText(paths.complete);
   const auto digest = NormalizedReferenceSha256(reference.sequences);
+  const auto creator = MarkerValue(complete, "sufkit_commit", paths.complete);
+  // Format 1.4 / Fast full-SA compatibility is tested in both directions.
+  constexpr std::string_view previous =
+      "bdb67c6de5daddd8a005640de73d96549d2575f4";
+  if (creator != kRequiredSufkitCommit && creator != previous) {
+    throw DependencyError("reference index was created by an incompatible Sufkit commit");
+  }
   if (MarkerValue(complete, "schema_version", paths.complete) != "1" ||
-      MarkerValue(complete, "sufkit_commit", paths.complete) !=
-          kRequiredSufkitCommit ||
       MarkerValue(complete, "normalized_reference_sha256", paths.complete) !=
           digest ||
       MarkerValue(complete, "manifest_sha256", paths.complete) !=
@@ -173,7 +178,7 @@ void ValidateReferenceIndexBundle(const std::filesystem::path& index,
   RequireContains(manifest, "\"acceleration\": \"suffix-link\"",
                   paths.manifest);
   RequireContains(manifest, "\"sufkit_commit\": \"" +
-                    std::string(kRequiredSufkitCommit) + "\"", paths.manifest);
+                    creator + "\"", paths.manifest);
   RequireContains(manifest, "\"sufkit_version\": \"0.3.0\"", paths.manifest);
   RequireContains(manifest, "\"normalized_reference_sha256\": \"" + digest + "\"",
                   paths.manifest);
@@ -201,11 +206,13 @@ void ValidateReferenceIndexBundle(const std::filesystem::path& index,
                   << ambiguous << "}";
     RequireContains(manifest, catalog_entry.str(), paths.manifest);
   }
+  return creator;
 }
 
 ReferenceIndexPaths RunReferenceIndexPipeline(
     const IndexSpec& spec, std::string invocation,
-    const std::filesystem::path& binary_path) {
+    const std::filesystem::path& binary_path,
+    const CpuAffinityInfo& launch_affinity) {
   ValidateIndexSpec(spec);
   const auto paths = MakeReferenceIndexPaths(spec.output_path);
   for (const auto& path : {paths.index, paths.manifest, paths.complete}) {
@@ -241,25 +248,75 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
     auto reference = ReadFasta(spec.reference_path, 0);
     const auto digest = NormalizedReferenceSha256(reference.sequences);
     const auto source_digest = FileSha256(spec.reference_path);
+    const auto pre_sufkit_affinity = CurrentCpuAffinity();
+    ValidateCpuAffinityBudget(pre_sufkit_affinity, spec.threads,
+                              "Sufkit index build");
+    if (launch_affinity.supported &&
+        pre_sufkit_affinity.logical_cpus != launch_affinity.logical_cpus) {
+      throw CliError(
+          "CPU affinity changed before Sufkit index build "
+          "(launch=" + launch_affinity.CpuList() +
+          ", pre_sufkit=" + pre_sufkit_affinity.CpuList() + ")");
+    }
+    SufkitIndexOptions index_options{spec.threads};
+    index_options.build_stage_context = &progress;
+    index_options.build_stage_callback = [](const char* phase, void* context) {
+      // Observability is best effort; cancellation is checked by the pipeline.
+      try {
+        static_cast<ProgressSession*>(context)->Stage(phase);
+      } catch (...) {
+      }
+    };
+    const bool expect_caps =
+        spec.threads > 1 &&
+        reference.total_bases >=
+            index_options.parallel_caps_min_reference_bases;
+    std::ostringstream build_detail;
+    build_detail << "backend=" << (expect_caps ? "caps" : "divsufsort")
+                 << " requested_threads=" << spec.threads
+                 << " allowed_cpu_count="
+                 << pre_sufkit_affinity.logical_cpus.size()
+                 << " allowed=" << pre_sufkit_affinity.CpuList();
     const auto build_begin = Clock::now();
     stage = "index-build";
-    progress.Stage(stage, 0, 0, spec.reference_path.string());
+    progress.Stage(stage, 0, 0, build_detail.str());
     auto index = SufkitSeedIndex::Build(
-        reference.sequences, SufkitIndexOptions{spec.threads});
+        reference.sequences, index_options);
     const double build_seconds =
         std::chrono::duration<double>(Clock::now() - build_begin).count();
+    const auto stats = index.BuildStatistics();
+    if (expect_caps && !stats.backend.starts_with("caps")) {
+      throw DependencyError(
+          "large-reference parallel index policy selected CaPS, but Sufkit "
+          "reported backend '" + stats.backend + "'");
+    }
     stage = "index-save";
     progress.Stage(stage);
+    const auto save_begin = Clock::now();
     index.Save(temporary_index);
+    const double save_seconds =
+        std::chrono::duration<double>(Clock::now() - save_begin).count();
     stage = "index-validation";
     progress.Stage(stage);
+    const auto validation_begin = Clock::now();
     static_cast<void>(SufkitSeedIndex::Load(
-        temporary_index, reference.sequences, SufkitIndexOptions{spec.threads}));
-    const auto stats = index.BuildStatistics();
+        temporary_index, reference.sequences, index_options));
+    const double validation_seconds =
+        std::chrono::duration<double>(Clock::now() - validation_begin).count();
     const auto serialized_bytes = std::filesystem::file_size(temporary_index);
     const auto source_bytes = std::filesystem::file_size(spec.reference_path);
     const auto binary_bytes = std::filesystem::file_size(binary_path);
     const auto binary_digest = FileSha256(binary_path);
+
+    stage = "publication";
+    progress.Stage(stage, 0, 3);
+    const auto publication_begin = Clock::now();
+    published.emplace_back(temporary_index, paths.index);
+    PublishNoReplace(temporary_index, paths.index);
+    const double index_publication_seconds =
+        std::chrono::duration<double>(Clock::now() - publication_begin).count();
+    progress.Update(1, 3);
+
     std::ostringstream manifest;
     manifest << "{\n"
              << "  \"schema_version\": 1,\n"
@@ -289,7 +346,35 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
              << "  \"reference_ambiguous_bases\": " << reference.ambiguous_bases << ",\n"
              << "  \"index_bytes\": " << serialized_bytes << ",\n"
              << "  \"threads\": " << spec.threads << ",\n"
+             << "  \"requested_threads\": " << spec.threads << ",\n"
+             << "  \"launch_allowed_cpu_count\": "
+             << launch_affinity.logical_cpus.size() << ",\n"
+             << "  \"launch_allowed_cpu_list\": \""
+             << Escape(launch_affinity.CpuList()) << "\",\n"
+             << "  \"launch_allowed_cpu_source\": \""
+             << Escape(launch_affinity.source) << "\",\n"
+             << "  \"pre_sufkit_allowed_cpu_count\": "
+             << pre_sufkit_affinity.logical_cpus.size() << ",\n"
+             << "  \"pre_sufkit_allowed_cpu_list\": \""
+             << Escape(pre_sufkit_affinity.CpuList()) << "\",\n"
+             << "  \"index_backend\": \"" << Escape(stats.backend) << "\",\n"
              << "  \"build_seconds\": " << build_seconds << ",\n"
+             << "  \"sufkit_build_seconds\": "
+             << stats.sufkit_build_seconds << ",\n"
+             << "  \"suffix_array_seconds\": "
+             << stats.suffix_array_seconds << ",\n"
+             << "  \"isa_seconds\": " << stats.isa_seconds << ",\n"
+             << "  \"caps_construct_seconds\": " << stats.caps_construct_seconds << ",\n"
+             << "  \"caps_output_allocation_seconds\": " << stats.caps_output_allocation_seconds << ",\n"
+             << "  \"text_prepare_seconds\": " << stats.text_prepare_seconds << ",\n"
+             << "  \"lcp_finalize_seconds\": " << stats.lcp_finalize_seconds << ",\n"
+             << "  \"prefix_directory_seconds\": " << stats.prefix_directory_seconds << ",\n"
+             << "  \"lcp_seconds\": " << stats.lcp_seconds << ",\n"
+             << "  \"index_save_seconds\": " << save_seconds << ",\n"
+             << "  \"index_validation_seconds\": "
+             << validation_seconds << ",\n"
+             << "  \"index_publication_seconds\": "
+             << index_publication_seconds << ",\n"
              << "  \"total_seconds\": "
              << std::chrono::duration<double>(Clock::now() - started).count() << ",\n"
              << "  \"ramag_commit\": \"" << RAMAG_GIT_COMMIT << "\",\n"
@@ -318,17 +403,12 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
              << "manifest_sha256=" << Sha256Hex(manifest_text) << "\n";
     WriteText(temporary_complete, complete.str());
 
-    stage = "publication";
-    progress.Stage(stage, 0, 3);
-    PublishNoReplace(temporary_index, paths.index);
-    progress.Update(1, 3);
-    published.emplace_back(temporary_index, paths.index);
+    published.emplace_back(temporary_manifest, paths.manifest);
     PublishNoReplace(temporary_manifest, paths.manifest);
     progress.Update(2, 3);
-    published.emplace_back(temporary_manifest, paths.manifest);
+    published.emplace_back(temporary_complete, paths.complete);
     PublishNoReplace(temporary_complete, paths.complete);
     progress.Update(3, 3);
-    published.emplace_back(temporary_complete, paths.complete);
     progress.Finish(std::to_string(serialized_bytes) + " bytes");
     for (const auto& temporary : temporaries) {
       std::error_code ignored;
@@ -366,15 +446,15 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
       }
     } catch (...) {
     }
-    for (const auto& path : temporaries) {
-      std::error_code ignored;
-      std::filesystem::remove(path, ignored);
-    }
     for (auto it = published.rbegin(); it != published.rend(); ++it) {
       std::error_code ignored;
       if (std::filesystem::equivalent(it->first, it->second, ignored) && !ignored) {
         std::filesystem::remove(it->second, ignored);
       }
+    }
+    for (const auto& path : temporaries) {
+      std::error_code ignored;
+      std::filesystem::remove(path, ignored);
     }
     throw;
   }

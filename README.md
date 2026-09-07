@@ -39,9 +39,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-The public source tree does not include the internal test suite. CMake detects
-that absence and skips test targets; it is not required to build or install
-the `ramag` executable.
+The public source tree omits the project's internal test suite. CMake detects
+that omission and skips test targets; it does not prevent configuring, building,
+installing, or running RaMA-G.
 
 The default build resolves exact, clean Sufkit and SeqPro Git snapshots. See
 the [user guide](docs/user-guide.md#2-installation-and-build) for fresh release,

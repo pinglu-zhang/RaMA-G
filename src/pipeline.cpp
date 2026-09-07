@@ -1,4 +1,7 @@
 #include "ramag/pipeline.hpp"
+#if RAMAG_USE_PAIRWISE_CORE
+#include "ramag/pairwise_core.hpp"
+#endif
 
 #include "ramag/alignment.hpp"
 #include "ramag/fasta.hpp"
@@ -612,21 +615,33 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       progress.Stage(stage, 0, 0,
                      load_persistent_index ? spec.reference_index_path.string()
                                            : "ephemeral");
+      std::string index_creator_commit{kRequiredSufkitCommit};
+      SufkitIndexOptions core_index_options{spec.threads};
+#if RAMAG_USE_PAIRWISE_CORE
+      core_index_options.mam_worker_cap = spec.threads;
+      core_index_options.mam_workspace_limit_bytes = UINT64_MAX;
+      core_index_options.boundary_mem_occurrence_limit = UINT64_MAX;
+#endif
       auto index = [&]() {
         if (load_persistent_index) {
-          ValidateReferenceIndexBundle(spec.reference_index_path, reference);
+          index_creator_commit =
+              ValidateReferenceIndexBundle(spec.reference_index_path, reference);
           return SufkitSeedIndex::Load(
               spec.reference_index_path, reference.sequences,
-              SufkitIndexOptions{spec.threads});
+              core_index_options);
         }
         return SufkitSeedIndex::Build(
-            reference.sequences, SufkitIndexOptions{spec.threads});
+            reference.sequences, core_index_options);
       }();
       const double index_seconds = SecondsBetween(index_begin, Clock::now());
       timings[load_persistent_index ? "index_load" : "index_build"] =
           index_seconds;
       adapter_provenance["sufkit.index.action"] =
           load_persistent_index ? "loaded" : "built";
+      adapter_provenance["sufkit.index.created_with_commit"] =
+          index_creator_commit;
+      adapter_provenance["sufkit.index.loaded_with_commit"] =
+          std::string(kRequiredSufkitCommit);
       adapter_provenance["sufkit.index.path"] =
           load_persistent_index
               ? AbsolutePathString(spec.reference_index_path)
@@ -829,14 +844,27 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
                     ":sampling=" + std::to_string(index_stats.sampling_rate) +
                     ":acceleration=" + index_stats.acceleration;
       seeding_route = seed_result.statistics.actual_route;
+#if RAMAG_USE_PAIRWISE_CORE
+      result = AlignPairwiseFromSeeds(
+#else
       result = AlignGenomesFromSeeds(
+#endif
           reference.sequences, query.sequences, alignment_options,
           std::move(seed_result.seeds), std::move(seed_statistics));
     } else {
       stage = "seed-enumeration";
       progress.Stage(stage);
+#if RAMAG_USE_PAIRWISE_CORE
+      RunStatistics oracle_statistics;
+      auto oracle_seeds = EnumerateSeeds(reference.sequences, query.sequences,
+                                        alignment_options, &oracle_statistics);
+      result = AlignPairwiseFromSeeds(reference.sequences, query.sequences,
+                                   alignment_options, std::move(oracle_seeds),
+                                   std::move(oracle_statistics));
+#else
       result = AlignGenomes(reference.sequences, query.sequences,
                             alignment_options);
+#endif
       index_route = "bundled-canonical-kmer-oracle-index";
       seeding_route = SeedRoute(spec.alignment.seed_mode);
     }
@@ -995,6 +1023,9 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     manifest.index_route = std::move(index_route);
     manifest.seeding_route = std::move(seeding_route);
     manifest.chaining_route = result.statistics.chaining_route;
+#if RAMAG_USE_PAIRWISE_CORE
+    manifest.extension_route = "pairwise-ksw2-certified-global+endpoint-extension";
+#endif
     manifest.input_parallel_route = std::move(input_parallel_route);
     manifest.input_requested_workers = input_requested_workers;
     manifest.input_actual_workers = input_actual_workers;

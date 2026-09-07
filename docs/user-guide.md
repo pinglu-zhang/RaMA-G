@@ -1,5 +1,14 @@
 # RaMA-G User Guide
 
+> Experimental index-build branch: the pinned Sufkit candidate is a
+> server-local, unpushed commit. Until review and publication, configure with
+> `-DRAMAG_SUFKIT_SOURCE_DIR="$SUFKIT_CHECKOUT"`, where that clean checkout is
+> at the exact candidate SHA listed below. Fetching this commit from the
+> upstream repository is not yet a reproducible public installation path.
+> Existing indexes created by the original Sufkit
+> `bdb67c6de5daddd8a005640de73d96549d2575f4` are explicitly accepted after
+> the same reference, format, capability, CRC, and companion checks.
+
 This guide describes the behavior implemented by RaMA-G 0.1.0. It is a
 runtime manual, not a roadmap: options or workflows that are not implemented
 are identified as limitations rather than presented as available features.
@@ -52,15 +61,10 @@ From the repository root:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
 The executable is `build/ramag`.
-
-The public source tree does not include RaMA-G's internal test suite. CMake
-detects that the `tests/` directory is absent and skips test targets; this does
-not prevent configuration, compilation, or installation of `ramag`. A private
-development checkout that includes the test sources can additionally run
-`ctest --test-dir build --output-on-failure`.
 
 ### 2.3 Fresh release-quality build
 
@@ -71,6 +75,7 @@ cmake -S . -B build-release \
   -DCMAKE_BUILD_TYPE=Release \
   -DRAMAG_WARNINGS_AS_ERRORS=ON
 cmake --build build-release -j
+ctest --test-dir build-release --output-on-failure
 ```
 
 Do not reuse a build cache after changing either pinned dependency or its
@@ -82,7 +87,7 @@ The production build pins exact Git commits:
 
 | Dependency | Required identity |
 |---|---|
-| Sufkit | `bdb67c6de5daddd8a005640de73d96549d2575f4` (0.3.0) |
+| Sufkit | `50e2e5b82ec4dd451fd68d0f2cfcd29566c10010` (0.3.0) |
 | SeqPro | `6781cadcf81a0da53d7573444594c1484947017c` |
 
 The default CMake route fetches these identities. Local sources can be supplied
@@ -296,6 +301,22 @@ reference.sufidx.complete
 All three files form one bundle. RaMA-G refuses to overwrite any existing
 member. A `.sufidx` without the RaMA-G companion manifest and completion marker
 is not accepted as a reusable production index.
+
+On Linux, RaMA-G also verifies the CPU allocation before starting Sufkit.
+OpenMP runtimes may bind the initial thread before `main()` when
+`OMP_PROC_BIND` is enabled, while the CaPS scheduler creates ordinary worker
+threads that inherit the caller's affinity. For index construction, RaMA-G
+captures the launch CPU mask in an ELF pre-initialization hook, before libgomp
+initializes. It restores that captured set before CaPS starts, respecting the
+allocation supplied by `taskset` or the scheduler. If it has fewer logical CPUs than
+`--threads`, the command fails before the expensive build instead of silently
+running the requested workers on one core.
+
+The index manifest records the launch and pre-Sufkit CPU sets, selected
+backend, Sufkit build time, save time, validation time, publication time, and
+total command time. These phases are separate: a fast in-memory suffix-array
+construction does not imply that serializing and validating a large persistent
+index takes no additional time.
 
 ### 5.2 Load the index
 
@@ -682,6 +703,7 @@ cmake -S . -B build-release \
   -DCMAKE_BUILD_TYPE=Release \
   -DRAMAG_WARNINGS_AS_ERRORS=ON
 cmake --build build-release -j
+ctest --test-dir build-release --output-on-failure
 ./build-release/ramag --version
 ```
 

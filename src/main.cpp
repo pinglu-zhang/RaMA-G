@@ -11,6 +11,50 @@
 #include <sstream>
 #include <string>
 
+#if defined(__linux__) && defined(__ELF__)
+#include <cerrno>
+#include <cstring>
+#include <sched.h>
+namespace {
+// ELF preinit runs before shared-library constructors, including libgomp.
+// Only POD state and the affinity system interface are used here.
+cpu_set_t launch_cpu_mask;
+int launch_cpu_status = -1;
+int launch_cpu_error = 0;
+__attribute__((no_sanitize("address", "undefined")))
+void CaptureLaunchCpuMask() {
+  launch_cpu_status = sched_getaffinity(0, sizeof(launch_cpu_mask),
+                                       &launch_cpu_mask);
+  if (launch_cpu_status != 0) launch_cpu_error = errno;
+}
+using PreinitFunction = void (*)();
+__attribute__((section(".preinit_array"), used))
+PreinitFunction capture_launch_cpu_mask = CaptureLaunchCpuMask;
+}
+#endif
+
+namespace {
+ramag::CpuAffinityInfo LaunchCpuAffinity() {
+#if defined(__linux__) && defined(__ELF__)
+  if (launch_cpu_status != 0) {
+    throw ramag::CliError("cannot capture pre-runtime CPU affinity: " +
+                         std::string(std::strerror(launch_cpu_error)));
+  }
+  ramag::CpuAffinityInfo info;
+  info.supported = true;
+  info.source = "elf-preinit-sched-affinity";
+  for (std::uint32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(static_cast<int>(cpu), &launch_cpu_mask)) {
+      info.logical_cpus.push_back(cpu);
+    }
+  }
+  return info;
+#else
+  return ramag::CurrentCpuAffinity();
+#endif
+}
+}
+
 namespace {
 
 std::string QuoteArgument(std::string_view argument) {
@@ -68,18 +112,31 @@ int main(int argc, char** argv) {
     }
     auto binary_path = RunningBinaryPath(argv[0]);
     if (parsed.command == ramag::CommandKind::Index) {
-      ramag::ConfigureOpenMpRuntime(parsed.index_spec);
+      const auto launch_affinity = LaunchCpuAffinity();
+      ramag::ConfigureIndexRuntime(parsed.index_spec, launch_affinity);
       if (parsed.print_effective_config) {
         std::cout << ramag::EffectiveIndexConfigText(parsed.index_spec);
         return 0;
       }
       const auto paths = ramag::RunReferenceIndexPipeline(
-          parsed.index_spec, Invocation(argc, argv), binary_path);
+          parsed.index_spec, Invocation(argc, argv), binary_path,
+          launch_affinity);
       std::cout << "RaMA-G reference index completed: index=" << paths.index
                 << "; marker=" << paths.complete << '\n';
       return 0;
     }
     ramag::ConfigureOpenMpRuntime(parsed.run_spec);
+#if RAMAG_USE_PAIRWISE_CORE && defined(__linux__)
+    // Restore only the executable's pre-libgomp authorized CPU mask. The
+    // reusable library never changes its caller's affinity or signal handlers.
+    (void)LaunchCpuAffinity();
+    if (static_cast<unsigned>(CPU_COUNT(&launch_cpu_mask)) < parsed.run_spec.threads) {
+      throw ramag::CliError("pairwise core: requested threads exceed launch allowed CPUs");
+    }
+    if (sched_setaffinity(0, sizeof(launch_cpu_mask), &launch_cpu_mask) != 0) {
+      throw ramag::CliError("pairwise core: could not restore launch CPU affinity");
+    }
+#endif
     if (parsed.print_effective_config) {
       std::cout << ramag::EffectiveConfigText(parsed.run_spec);
       return 0;

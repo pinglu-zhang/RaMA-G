@@ -726,8 +726,13 @@ SufkitSeedIndex SufkitSeedIndex::Build(
         build_options.sampling_rate = 1;
         build_options.learned_index.enabled = false;
         build_options.statistics = &phase_statistics;
+        build_options.stage_callback = options.build_stage_callback;
+        build_options.stage_context = options.build_stage_context;
 
+        const auto sufkit_build_begin = Clock::now();
         auto index = sufkit::SuffixArray::Build(genome, build_options);
+        const double sufkit_build_seconds =
+            ElapsedSeconds(sufkit_build_begin);
         const sufkit::IndexInfo info = index.GetInfo();
         if (index.SamplingRate() != 1 || info.sa_sampling_rate != 1) {
             throw DependencyError(
@@ -776,6 +781,12 @@ SufkitSeedIndex SufkitSeedIndex::Build(
         statistics.prefix_directory_enabled =
             statistics.prefix_directory_bytes != 0;
         statistics.total_build_seconds = ElapsedSeconds(begin);
+        statistics.sufkit_build_seconds = sufkit_build_seconds;
+        statistics.caps_construct_seconds = phase_statistics.caps_construct_seconds;
+        statistics.caps_output_allocation_seconds = phase_statistics.caps_output_allocation_seconds;
+        statistics.text_prepare_seconds = phase_statistics.text_prepare_seconds;
+        statistics.lcp_finalize_seconds = phase_statistics.lcp_finalize_seconds;
+        statistics.prefix_directory_seconds = phase_statistics.prefix_directory_seconds;
         statistics.suffix_array_seconds = phase_statistics.sa_seconds;
         statistics.storage_compaction_seconds =
             phase_statistics.storage_compaction_seconds;

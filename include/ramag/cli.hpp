@@ -73,6 +73,14 @@ struct OpenMpRuntimeInfo {
   std::uint32_t configured_requested_threads{0};
 };
 
+struct CpuAffinityInfo {
+  bool supported{false};
+  std::vector<std::uint32_t> logical_cpus;
+  std::string source{"unavailable"};
+
+  [[nodiscard]] std::string CpuList() const;
+};
+
 struct CliParseResult {
   CommandKind command{CommandKind::Align};
   RunSpec run_spec;
@@ -97,8 +105,13 @@ class CliError : public std::runtime_error {
 [[nodiscard]] std::string EffectiveConfigText(const RunSpec& spec);
 [[nodiscard]] std::string EffectiveIndexConfigText(const IndexSpec& spec);
 [[nodiscard]] OpenMpRuntimeInfo CurrentOpenMpRuntimeInfo();
+[[nodiscard]] CpuAffinityInfo CurrentCpuAffinity();
+void ValidateCpuAffinityBudget(const CpuAffinityInfo& affinity,
+                               std::uint32_t requested_threads,
+                               std::string_view context);
 void ConfigureOpenMpRuntime(const RunSpec& spec);
-void ConfigureOpenMpRuntime(const IndexSpec& spec);
+void ConfigureIndexRuntime(const IndexSpec& spec,
+                           const CpuAffinityInfo& launch_affinity);
 void ValidateRunSpec(const RunSpec& spec);
 void ValidateIndexSpec(const IndexSpec& spec);
 

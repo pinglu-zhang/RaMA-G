@@ -12,6 +12,12 @@ set(RAMAG_EFFECTIVE_CXX_FLAGS
 
 include(CTest)
 include(GNUInstallDirs)
+set(RAMAG_INTERNAL_ALIGNMENT_CORE "legacy" CACHE STRING "Internal alignment core: legacy or pairwise")
+set_property(CACHE RAMAG_INTERNAL_ALIGNMENT_CORE PROPERTY STRINGS legacy pairwise)
+if(NOT RAMAG_INTERNAL_ALIGNMENT_CORE MATCHES "^(legacy|pairwise)$")
+  message(FATAL_ERROR "Unknown RAMAG_INTERNAL_ALIGNMENT_CORE: ${RAMAG_INTERNAL_ALIGNMENT_CORE}")
+endif()
+option(RAMAG_BUILD_PAIRWISE_LIBRARY "Build/install the independent graph-free pairwise core" OFF)
 find_package(ZLIB REQUIRED)
 
 # Linux x86-64 is the v1 production platform.  OpenMP is therefore a required
@@ -49,7 +55,7 @@ option(RAMAG_ENABLE_PINNED_DEPENDENCIES
 set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
     "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
-set(RAMAG_SUFKIT_COMMIT "bdb67c6de5daddd8a005640de73d96549d2575f4"
+set(RAMAG_SUFKIT_COMMIT "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010"
     CACHE STRING "Required sufkit commit")
 set(RAMAG_SEQPRO_COMMIT "6781cadcf81a0da53d7573444594c1484947017c"
     CACHE STRING "Required SeqPro commit")
@@ -144,6 +150,16 @@ add_library(ramag_core
   src/writers.cpp)
 add_library(RaMA-G::core ALIAS ramag_core)
 
+if(RAMAG_BUILD_PAIRWISE_LIBRARY OR RAMAG_INTERNAL_ALIGNMENT_CORE STREQUAL "pairwise")
+  include(cmake/RaMAGPairwiseCore.cmake)
+endif()
+if(RAMAG_INTERNAL_ALIGNMENT_CORE STREQUAL "pairwise")
+  target_link_libraries(ramag_core PRIVATE ramag_pairwise)
+  target_compile_definitions(ramag_core PUBLIC RAMAG_USE_PAIRWISE_CORE=1)
+else()
+  target_compile_definitions(ramag_core PUBLIC RAMAG_USE_PAIRWISE_CORE=0)
+endif()
+
 target_compile_features(ramag_core PUBLIC cxx_std_20)
 target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB)
 target_include_directories(
@@ -213,6 +229,16 @@ endif()
 
 if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  if(TARGET ramag_pairwise AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/pairwise_core_tests.cpp")
+    add_library(ramag_pairwise_reference OBJECT tests/pairwise_reference_gap.cpp)
+    target_compile_features(ramag_pairwise_reference PRIVATE cxx_std_20)
+    target_include_directories(ramag_pairwise_reference PRIVATE third_party/ksw2)
+    target_link_libraries(ramag_pairwise_reference PRIVATE RaMAG::pairwise)
+    add_executable(ramag_pairwise_core_tests tests/pairwise_core_tests.cpp $<TARGET_OBJECTS:ramag_pairwise_reference>)
+    target_link_libraries(ramag_pairwise_core_tests PRIVATE RaMAG::pairwise)
+    ramag_apply_project_warnings(ramag_pairwise_core_tests)
+    add_test(NAME ramag.pairwise.core COMMAND ramag_pairwise_core_tests)
+  endif()
   add_executable(ramag_unit_tests tests/unit_tests.cpp)
   target_link_libraries(ramag_unit_tests PRIVATE RaMA-G::core)
   ramag_apply_project_warnings(ramag_unit_tests)
@@ -282,6 +308,7 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
       -DEXPECTED_DIVSUFSORT_OPENMP=${RAMAG_SUFKIT_DIVSUFSORT_OPENMP_VALUE}
       -DEXPECT_PINNED_ADAPTERS=${RAMAG_ENABLE_PINNED_DEPENDENCIES}
       -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/integration-smoke
+      -DRAMAG_ALIGNMENT_CORE=${RAMAG_INTERNAL_ALIGNMENT_CORE}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_smoke.cmake)
 
   if(UNIX)

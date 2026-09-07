@@ -1,0 +1,26 @@
+{
+  "source_commit": "7d08359e0df7f7e6ffcfe67217c3399761cb2129",
+  "source_files": {
+    "include/anchor.h": "61a12d534bc2f80011380d2ef9224b204221898de7937d64ac50b4cdf53eb08e",
+    "include/align.h": "bbc859a0c54ee943866dd0186c4a1d5ffe80f27bde304ed0fc713def9bd93b91",
+    "src/anchor/cluster.cpp": "f7f7c0aa47613717aaf8b66252622b7429a98e4939975f54ae469c58d79bd58e",
+    "src/anchor/anchor.cpp": "8102ac77282b00905832790d2840a457b5c15172ea9ff39e278879a77d0dcaf0",
+    "src/anchor/anchor_link_internal.h": "f7f0c56423359427804bcfb50af083e42b0bc72591b7eb73a6b9bdf6b455c381",
+    "src/align/align.cpp": "13a525b730d7c471a2ee9fb13472e5cc0755a5439b82433ba80f1fda6e082988",
+    "src/align/cigar.cpp": "f9b3778ac9ad17e34ab6a02181d25990cc49ddf06adfd846e72aff3fad5c9518",
+    "src/align/pair_rare_aligner.cpp": "aad94d3da4fadfa7200c88178413f8503b19b010a6e5af215c74feba60276281",
+    "include/ksw2.h": "1e531580a40dc1b29db7a63f0f50403995e1c637da68c7c14164df34f0979d9c",
+    "src/align/ksw2_extz2_sse.c": "e50aa08c09f9a78daec93bd122570e4e87d6f72c4eb96a1262d30a2625ffe713"
+  },
+  "semantic_exceptions": [
+    "signed-coordinate subtraction before arithmetic",
+    "floating-point final DP best"
+  ],
+  "adaptations": [
+    "64-bit internal storage and checked public input",
+    "immutable default HOXD70 configuration, no environment reads",
+    "in-memory private sequence view in place of SeqPro",
+    "no graph, logging, CLI or external MSA dependencies",
+    "RaMA-G pairwise naming and source layout; KSW test hooks renamed only; algorithm unchanged"
+  ]
+}

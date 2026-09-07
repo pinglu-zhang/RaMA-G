@@ -5,9 +5,15 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cerrno>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <system_error>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #if RAMAG_OPENMP_ENABLED
 #include <omp.h>
@@ -236,8 +242,108 @@ OpenMpRuntimeInfo CurrentOpenMpRuntimeInfo() {
   return info;
 }
 
+std::string CpuAffinityInfo::CpuList() const {
+  if (!supported) return "unavailable";
+  if (logical_cpus.empty()) return "empty";
+  std::ostringstream output;
+  for (std::size_t begin = 0; begin < logical_cpus.size();) {
+    std::size_t end = begin;
+    while (end + 1 < logical_cpus.size() &&
+           logical_cpus[end + 1] == logical_cpus[end] + 1U) {
+      ++end;
+    }
+    if (begin != 0) output << ',';
+    output << logical_cpus[begin];
+    if (end != begin) output << '-' << logical_cpus[end];
+    begin = end + 1;
+  }
+  return output.str();
+}
+
+CpuAffinityInfo CurrentCpuAffinity() {
+  CpuAffinityInfo info;
+#if defined(__linux__)
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  if (sched_getaffinity(0, sizeof(mask), &mask) != 0) {
+    throw CliError("cannot inspect CPU affinity: " +
+                   std::string(std::strerror(errno)));
+  }
+  info.supported = true;
+  info.source = "sched-affinity";
+  for (std::uint32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(static_cast<int>(cpu), &mask)) {
+      info.logical_cpus.push_back(cpu);
+    }
+  }
+  if (info.logical_cpus.empty()) {
+    throw CliError("CPU affinity contains no available logical CPUs");
+  }
+#endif
+  return info;
+}
+
+void ValidateCpuAffinityBudget(const CpuAffinityInfo& affinity,
+                               std::uint32_t requested_threads,
+                               std::string_view context) {
+  if (!affinity.supported) return;
+  if (affinity.logical_cpus.size() <
+      static_cast<std::size_t>(requested_threads)) {
+    throw CliError(std::string(context) + " requested " +
+                   std::to_string(requested_threads) +
+                   " threads but current CPU affinity permits only " +
+                   std::to_string(affinity.logical_cpus.size()) +
+                   " logical CPUs (allowed=" + affinity.CpuList() + ")");
+  }
+}
+
+namespace {
+
+void RestoreCpuAffinity(const CpuAffinityInfo& affinity) {
+#if defined(__linux__)
+  if (!affinity.supported) return;
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  for (const auto cpu : affinity.logical_cpus) {
+    if (cpu >= CPU_SETSIZE) {
+      throw CliError("launch CPU affinity contains an unsupported CPU id: " +
+                     std::to_string(cpu));
+    }
+    CPU_SET(static_cast<int>(cpu), &mask);
+  }
+  if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+    throw CliError("cannot restore launch CPU affinity: " +
+                   std::string(std::strerror(errno)));
+  }
+#else
+  static_cast<void>(affinity);
+#endif
+}
+
+}  // namespace
+
 void ConfigureOpenMpRuntime(const RunSpec& spec) { ConfigureOpenMpRuntimeImpl(spec); }
-void ConfigureOpenMpRuntime(const IndexSpec& spec) { ConfigureOpenMpRuntimeImpl(spec); }
+
+void ConfigureIndexRuntime(const IndexSpec& spec,
+                           const CpuAffinityInfo& launch_affinity) {
+  ValidateCpuAffinityBudget(launch_affinity, spec.threads,
+                            "reference-index construction");
+  ConfigureOpenMpRuntimeImpl(spec);
+  // libgomp may bind the calling thread to the first OpenMP place while its
+  // runtime is initialized. CaPS uses a separate std::thread/parlay scheduler,
+  // whose workers inherit the caller's affinity. Restore exactly the CPU set
+  // granted at process launch and never widen beyond taskset/cgroup limits.
+  RestoreCpuAffinity(launch_affinity);
+  const auto restored = CurrentCpuAffinity();
+  if (launch_affinity.supported &&
+      restored.logical_cpus != launch_affinity.logical_cpus) {
+    throw CliError("restored CPU affinity differs from the process launch mask "
+                   "(launch=" + launch_affinity.CpuList() +
+                   ", restored=" + restored.CpuList() + ")");
+  }
+  ValidateCpuAffinityBudget(restored, spec.threads,
+                            "reference-index construction");
+}
 
 std::string FormatSelection::ToString() const {
   std::string result;
@@ -421,6 +527,11 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
 }
 
 void ValidateRunSpec(const RunSpec& spec) {
+#if RAMAG_USE_PAIRWISE_CORE
+  if (spec.alignment.break_length != 200 || spec.alignment.max_dp_cells != 4000000) {
+    throw CliError("pairwise core: legacy --break-length/--max-dp-cells overrides are not applicable");
+  }
+#endif
   ValidateInput(spec.reference_path, "reference");
   ValidateInput(spec.query_path, "query");
   if (!spec.reference_index_path.empty()) ValidateInput(spec.reference_index_path, "reference index");
@@ -526,6 +637,14 @@ std::string VersionText() {
 std::string EffectiveConfigText(const RunSpec& spec) {
   const auto openmp = CurrentOpenMpRuntimeInfo();
   std::ostringstream output;
+#if RAMAG_USE_PAIRWISE_CORE
+  output << "alignment_core=pairwise\n"
+         << "pairwise_source_commit=7d08359e0df7f7e6ffcfe67217c3399761cb2129\n"
+         << "extension_scoring=scaled-HOXD70;gap-open=40;gap-extend=3\n"
+         << "break_length_applicability=fixed-pairwise-200\n"
+         << "max_dp_cells_applicability=legacy-only\n"
+         << "selection_contract=pairwise-reference-query-dp-intersection\n";
+#endif
   output << "command=align\n"
          << "reference=" << AbsoluteForDisplay(spec.reference_path) << '\n'
          << "reference_index=" << AbsoluteForDisplay(spec.reference_index_path) << '\n'

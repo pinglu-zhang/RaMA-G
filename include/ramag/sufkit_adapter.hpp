@@ -16,7 +16,7 @@ namespace ramag {
 // CMake is responsible for rejecting a source-directory override whose clean
 // HEAD differs from this value.
 inline constexpr std::string_view kRequiredSufkitCommit =
-    "bdb67c6de5daddd8a005640de73d96549d2575f4";
+    "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010";
 
 struct SufkitIndexOptions {
     // One shared RaMA-G thread budget is reused by sequential stages: first
@@ -49,6 +49,8 @@ struct SufkitIndexOptions {
     std::uint64_t boundary_mem_occurrence_limit{100'000'000};
     std::uint64_t mam_workspace_limit_bytes{
         6ULL * 1024ULL * 1024ULL * 1024ULL};
+    void (*build_stage_callback)(const char*, void*) = nullptr;
+    void* build_stage_context = nullptr;
 };
 
 struct SufkitIndexStatistics {
@@ -82,6 +84,12 @@ struct SufkitIndexStatistics {
     bool prefix_directory_enabled{};
 
     double total_build_seconds{};
+    double sufkit_build_seconds{};
+    double caps_construct_seconds{};
+    double caps_output_allocation_seconds{};
+    double text_prepare_seconds{};
+    double lcp_finalize_seconds{};
+    double prefix_directory_seconds{};
     double suffix_array_seconds{};
     double storage_compaction_seconds{};
     double isa_seconds{};

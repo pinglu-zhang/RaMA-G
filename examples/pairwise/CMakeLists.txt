@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22)
+project(RaMAGPairwiseExample LANGUAGES CXX)
+find_package(RaMAGPairwise CONFIG REQUIRED)
+add_executable(pairwise-example main.cpp)
+target_link_libraries(pairwise-example PRIVATE RaMAG::pairwise)

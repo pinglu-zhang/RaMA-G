@@ -1,5 +1,16 @@
 # RaMA-G Developer Guide
 
+> Experimental index-build branch: the Sufkit pin denotes a clean server-local
+> candidate, not a published upstream commit. The candidate preserves serialized
+> format 1.4 and Fast full-SA semantics. CaPS writes caller-owned SA/LCP buffers;
+> an immutable directory of equal-symbol runs of at least 256 bytes lets exact
+> LCP comparisons skip only proven-equal spans. No suffix, ambiguous symbol, or
+> comparison bound is removed. The prefix directory uses deterministic private
+> partitions and a stable merge. Original `sa_seconds` remains an inclusive
+> SA-construction measurement; CaPS allocation/construction are nested within it.
+> Full Build additionally includes text preparation, storage layout, ISA/LCP
+> finalization, and the prefix directory. Do not add nested timings twice.
+
 This guide describes the architecture and algorithms implemented in RaMA-G
 0.1.0 at commit `d2f46338ca89e54bdbeb5f0f2462b0d81635be54`. It is an implementation guide,
 not a roadmap or a function-by-function API reference. For command-line use,
@@ -147,10 +158,23 @@ than rebuilds the index.
 ### Sufkit construction contract
 
 The production adapter requires Sufkit 0.3.0 at exact commit
-`bdb67c6de5daddd8a005640de73d96549d2575f4`. It requests the Fast resource
+`50e2e5b82ec4dd451fd68d0f2cfcd29566c10010`. It requests the Fast resource
 profile, a standalone full suffix array with sampling rate 1, and the ISA, LCP,
 and suffix-link/query capabilities required by every seed mode. Learned-index
 construction is disabled.
+
+GNU OpenMP can apply `OMP_PROC_BIND` before program control reaches `main()`.
+That can reduce the initial thread to one OpenMP place even though the process
+was launched with a much larger `taskset` or scheduler allocation. CaPS uses a
+Parlay/`std::thread` scheduler, so its workers would otherwise inherit that
+single-place mask. On Linux ELF, an executable pre-initialization hook captures
+the launch mask before library constructors; this hook uses only static POD
+storage and the affinity system interface. Normal control flow restores that
+mask on the calling thread and verifies the requested worker budget before
+Sufkit. OpenMP places are not treated as the launch allocation: an explicit
+place list can be narrower or different. No CPU outside the captured launch
+mask is added. The manifest records the capture source and launch/pre-Sufkit
+sets. An undersized set is a configuration error, not a low-parallelism fallback.
 
 For a multi-threaded reference of at least 64 MiB, the current policy chooses
 the shared-memory CaPS constructor. Smaller inputs, or a one-thread build, use
@@ -437,6 +461,12 @@ teams. Parallel regions include eligible input work, large-reference CaPS
 construction, tiled reference-MAM work, independent chaining groups, and
 independent chain-extension tasks.
 
+Index construction has an additional scheduler boundary: OpenMP configures the
+shared budget, but the CaPS implementation owns a separate Parlay worker team.
+RaMA-G restores and validates the launch-authorized CPU set before that team is
+created. This prevents OpenMP binding policy from accidentally serializing
+CaPS while preserving external CPU-allocation limits.
+
 MUM and SMEM Sufkit callback enumeration are currently serial and operate on a
 whole query record. Small references use divsufsort even when more threads are
 requested; the manifest records requested, scheduled, and observed worker
@@ -484,16 +514,13 @@ run.
 
 ## 15. Current correctness boundary
 
-The internal validation baseline used before preparing the public source tree
-contains 14 CTest tests covering core units, required OpenMP configuration,
-exhaustive seed oracles, Sufkit adapter differential behavior,
+The current CTest suite contains 14 tests covering core units, required OpenMP
+configuration, exhaustive seed oracles, Sufkit adapter differential behavior,
 sparse-versus-quadratic chaining checks, clean and deliberately invalid
 dependency gates, end-to-end integration, progress/signals, and external SAM
-validation when the validator is available. Those internal test sources are
-not distributed in the public tree. CMake detects their absence and skips test
-targets without affecting the `ramag` library or executable build. This
-retained validation evidence supports the invariants described here; it is not
-a universal accuracy or performance claim.
+validation when the validator is available. This test structure supports the
+invariants described here; it is not a universal accuracy or performance
+claim.
 
 The implementation boundary is currently:
 
@@ -509,3 +536,60 @@ The implementation boundary is currently:
 
 Correctness and performance claims beyond these implemented and tested
 boundaries require a separately specified and accepted evaluation.
+
+## Experimental graph-free pairwise core
+
+The default build remains `RAMAG_INTERNAL_ALIGNMENT_CORE=legacy`. An opt-in
+`-DRAMAG_INTERNAL_ALIGNMENT_CORE=pairwise` build connects the CLI to the graph-free
+pairwise core. This is not the five-backend DP experiment. Its source attribution
+is recorded in the third-party notices. It implements clustering, best-chain recovery, component
+extension/linking and two-sided treap DP selection. Sufkit and input/index/output
+management remain RaMA-G responsibilities. No external application checkout is needed to build.
+
+The two intentional calculation corrections are signed conversion before
+coordinate subtraction/negation and a floating-point final DP best-score
+accumulator. The extracted KSW2 wrapper, scaled HOXD70 matrix, gap open 40 and
+extension 3, bandwidth checks and fallback decisions are retained. Equivalence
+to that implementation is not a guarantee of a globally optimal score: the
+independent short-gap DP diagnostic has found inherited score deficits. Do not
+describe this candidate as an unconditionally exact aligner.
+
+Use explicit `--seed-mode mumreference --selection-mode one-to-one` for the
+candidate MAM strategy. `one-to-one` now means the intersection of the two
+DP selections; `all` exposes valid pre-selection records. Neither route applies
+the legacy reciprocal interval filter a second time. The candidate rejects
+non-default legacy `--break-length` and `--max-dp-cells` overrides. Its effective
+configuration and manifest identify the core and scoring contract. Canonical
+output scores are recomputed from alignment columns; original selection support
+counts are separate fields in the library result.
+
+### Installing and calling the C++20 core
+
+To build the library without switching the CLI default:
+
+```sh
+cmake -S . -B build-library -DCMAKE_BUILD_TYPE=Release \
+  -DRAMAG_BUILD_PAIRWISE_LIBRARY=ON -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build build-library --parallel 4
+cmake --install build-library
+cmake -S examples/pairwise -B build-example -DCMAKE_PREFIX_PATH="$PWD/install"
+cmake --build build-example
+./build-example/pairwise-example
+```
+
+The installed package is `RaMAGPairwise`, with imported target
+`RaMAG::pairwise`. `ramag/pairwise_core.hpp` exposes `AlignPairwiseCore`: immutable
+normalized `SequenceRecord` spans, exact `Seed` anchors and explicit options in;
+owned records, separate reference/query selection flags and stage timings out.
+All coordinates remain 64-bit, zero-based and half-open, including original
+forward query coordinates for reverse-strand anchors. Invalid anchors fail
+rather than being silently dropped. Records must outlive the call; returned
+records own their storage. Concurrent calls use independent workspaces. User
+callbacks can run on workers and must be thread-safe. The library does not set
+process affinity, install signal handlers, read FASTA or require Sufkit, SeqPro
+or graph objects. The frozen KSW2 kernel currently requires x86 SSE2.
+
+Source attribution and input-file hashes are retained in `third_party/attribution/pairwise-source.json`.
+Internal equivalence tests are separate from the production library. Passing
+those tests does not establish the three-run full-dataset ten-minute target;
+that requires a separately completed timing and quality report.
