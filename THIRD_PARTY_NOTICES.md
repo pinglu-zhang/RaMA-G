@@ -7,7 +7,7 @@ The production dependency contract pins the following separately maintained
 libraries. Their own licenses and notices continue to apply when fetched or
 linked:
 
-- **sufkit**, commit `50e2e5b82ec4dd451fd68d0f2cfcd29566c10010`.
+- **sufkit**, commit `f8c4c386ee883e45ad0f973efc4c8e1148b0068a`.
 - **SeqPro**, commit `6781cadcf81a0da53d7573444594c1484947017c`.
 - **zlib**, discovered through CMake's `ZLIB::ZLIB` target and linked for
   in-process streaming gzip/BGZF-compatible FASTA decompression. The zlib

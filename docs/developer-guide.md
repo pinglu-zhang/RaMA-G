@@ -158,7 +158,7 @@ than rebuilds the index.
 ### Sufkit construction contract
 
 The production adapter requires Sufkit 0.3.0 at exact commit
-`50e2e5b82ec4dd451fd68d0f2cfcd29566c10010`. It requests the Fast resource
+`f8c4c386ee883e45ad0f973efc4c8e1148b0068a`. It requests the Fast resource
 profile, a standalone full suffix array with sampling rate 1, and the ISA, LCP,
 and suffix-link/query capabilities required by every seed mode. Learned-index
 construction is disabled.
@@ -593,3 +593,75 @@ Source attribution and input-file hashes are retained in `third_party/attributio
 Internal equivalence tests are separate from the production library. Passing
 those tests does not establish the three-run full-dataset ten-minute target;
 that requires a separately completed timing and quality report.
+
+### Pairwise memory ownership and diagnostics
+
+The CLI transfers its `vector<Seed>` into the pairwise implementation. The
+internal match type is an alias of `Seed`; the public Seed layout is unchanged.
+The owner sorts seeds by contig pair, strand, query start, reference start and
+length, then exposes disjoint mutable spans to clustering tasks. Filtering
+compacts each span in place. Once the tasks join, spans are destroyed and the
+seed buffer is released before extension. Cluster-local storage is released as
+each extension task consumes it. The public `AlignPairwiseCore(span<const Seed>)`
+entry makes one owned copy before using this same implementation, so caller
+storage remains unchanged on success, failure or cancellation.
+
+Linked candidates are values with owning packed-CIGAR vectors. They are collected
+in stable group order into one candidate array; consumed group buffers are
+released. Reference and query selection tasks contain integer indices into that
+array, and sort their own index spans. Selection retains the existing window,
+score arithmetic, strict-greater updates and tie handling. The immutable final
+record order is unchanged. On the CLI one-to-one path, every candidate still
+undergoes packed-CIGAR, sequence, score and span validation, while only selected
+candidates allocate extended `=/X/I/D` output CIGARs. Packed CIGAR storage is
+released after validation/conversion. `all` and the public core continue to
+materialize every valid candidate.
+
+Pairwise manifests expose `memory_observations` with phase-boundary RSS and
+capacity bytes for seeds, clusters, anchors, CIGAR and named auxiliary storage.
+`index_estimated_bytes` is the Sufkit core estimate. RSS includes allocator
+retention and other process memory, whereas capacity totals describe the named
+containers and omit allocator metadata. These are samples, not continuous peaks;
+do not add samples from different phases. At `core-output-converted`, anchor
+capacity denotes the output `PairwiseAlignment` container. `elapsed_seconds`
+uses three local origins: index acquisition for index/seed pipeline samples,
+enumeration entry for `mam-*` samples, and core entry for `core-*` samples.
+
+An optional `resident_bytes_callback` provides RSS from the host. The CLI uses
+Linux process status; the standalone core does not read files or install signal
+handlers. An absent/unavailable sampler produces zero RSS. The callback is
+invoked at joined phase boundaries, not concurrently by core workers.
+
+`pairwise_statistics` separates actual global/endpoint KSW2 invocation counts
+and cumulative call seconds from linker attempts, candidate checks, long-gap
+rejections and failed gap closure. Global retries are individual KSW2 calls;
+certified simple paths do not increment this count. Timing is summed over
+workers and is not extension wall time. Per-task statistics use scoped
+thread-local routing and are merged after workers join. The historical
+`counts.dp_extensions` retains its legacy meaning and cannot be used to infer
+that the pairwise core made no KSW2 calls. Grouping and output-conversion timings
+are added separately without changing the historical stage definitions.
+
+The private memory test checks borrowed-input immutability, owner release,
+discarded-candidate validation, index-based selection against the quadratic
+oracle, and RSS/KSW2 observations. These correctness checks establish storage
+and output behavior; memory or speed improvements still require a separate
+benchmark of the completed candidate.
+
+
+### Experimental LCP encoding in reference indexes
+
+`RAMAG_INTERNAL_LCP_ENCODING=profile-default|raw|byte-coded` is an internal
+CMake setting; its default preserves existing builds. It controls newly built
+ephemeral indexes and `ramag index` only. Explicit index loading uses the
+stored encoding and never rebuilds or converts an index. Fast byte-coded LCP
+retains SA, ISA, suffix-link search, and the same prefix directory. All decoded
+values and alignment records must agree with raw storage.
+
+Use a new index output path for compressed experiments. Existing raw bundles
+remain usable after creator-commit compatibility validation; manifests record
+the actual encoding, storage sizes, and separate creator/loader identities.
+Experimental Sufkit commits may be server-local only: configure with the clean
+source override at the pinned full SHA, not a GitHub URL assumed to contain an
+unpublished commit. Memory and runtime improvements require accepted results
+on the same input and configuration; this setting makes no performance claim.

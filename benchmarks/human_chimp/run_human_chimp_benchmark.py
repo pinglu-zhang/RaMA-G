@@ -41,7 +41,7 @@ DEFAULT_PACKAGE = Path(
 DEFAULT_MUMMER_ROOT = Path(
     os.environ.get("MUMMER4_ROOT", DEFAULT_REPO.parent / "mummer-4.0.1")
 )
-EXPECTED_SUFKIT_COMMIT = "bdb67c6de5daddd8a005640de73d96549d2575f4"
+EXPECTED_SUFKIT_COMMIT = "f8c4c386ee883e45ad0f973efc4c8e1148b0068a"
 EXPECTED_SEQPRO_COMMIT = "6781cadcf81a0da53d7573444594c1484947017c"
 CONFIG_SCHEMA = "ramag.human-chimp-preliminary-config.v3"
 METRICS_SCHEMA = "ramag.command-metrics.v3"

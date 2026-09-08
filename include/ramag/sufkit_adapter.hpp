@@ -16,7 +16,7 @@ namespace ramag {
 // CMake is responsible for rejecting a source-directory override whose clean
 // HEAD differs from this value.
 inline constexpr std::string_view kRequiredSufkitCommit =
-    "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010";
+    "f8c4c386ee883e45ad0f973efc4c8e1148b0068a";
 
 struct SufkitIndexOptions {
     // One shared RaMA-G thread budget is reused by sequential stages: first
@@ -108,6 +108,7 @@ struct SufkitIndexStatistics {
 };
 
 struct SufkitSeedStatistics {
+    std::vector<MemoryObservation> memory_observations;
     SufkitIndexStatistics index;
 
     std::uint64_t query_contigs{};

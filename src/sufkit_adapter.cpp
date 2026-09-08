@@ -25,6 +25,10 @@
 #include <omp.h>
 #endif
 
+#ifndef RAMAG_INTERNAL_LCP_ENCODING
+#define RAMAG_INTERNAL_LCP_ENCODING "profile-default"
+#endif
+
 #ifndef RAMAG_HAVE_SUFKIT
 #define RAMAG_HAVE_SUFKIT 0
 #endif
@@ -155,8 +159,42 @@ void MergeIntervals(std::vector<Interval>& intervals) {
     return strand == Strand::Forward ? 0U : 1U;
 }
 
+// Append-only storage: vector growth never copies an entire large MAM task.
+// Small tasks start small; no chunk exceeds 65,536 entries.
+class MamSeedStorage {
+public:
+    static constexpr std::size_t kChunkSeeds = 65536;
+    std::size_t size() const noexcept { return size_; }
+    std::size_t capacity() const noexcept { return capacity_; }
+    void reserve(std::size_t requested) {
+        if (requested <= capacity_) return;
+        const auto extra = requested - capacity_;
+        if (chunks.empty() || chunks.back().capacity() == kChunkSeeds) {
+            chunks.emplace_back();
+        }
+        auto& chunk = chunks.back();
+        const auto old = chunk.capacity();
+        if (extra > kChunkSeeds - old) {
+            throw AlignmentError("reference-MAM chunk exceeds 65,536 seeds");
+        }
+        chunk.reserve(old + extra);
+        if (chunk.capacity() > kChunkSeeds) {
+            throw AlignmentError("reference-MAM allocator exceeded chunk capacity");
+        }
+        capacity_ += chunk.capacity() - old;
+    }
+    void push_back(Seed seed) {
+        chunks.back().push_back(std::move(seed));
+        ++size_;
+    }
+    std::vector<std::vector<Seed>> chunks;
+private:
+    std::size_t size_{};
+    std::size_t capacity_{};
+};
+
 struct alignas(64) MamTaskWorkspace {
-    std::vector<Seed> seeds;
+    MamSeedStorage seeds;
     std::uint64_t mam_occurrence_count{};
     std::uint64_t mem_occurrence_count{};
     std::uint64_t tile_raw_count{};
@@ -290,16 +328,18 @@ private:
     std::uint64_t limit_{};
 };
 
-void ReserveOneSeed(std::vector<Seed>& seeds,
+void ReserveOneSeed(MamSeedStorage& seeds,
                     MamWorkspaceBudget& budget) {
     if (seeds.size() != seeds.capacity()) {
         return;
     }
     const std::size_t old_capacity = seeds.capacity();
-    const std::size_t new_capacity = old_capacity == 0 ? 8U :
-        (old_capacity > std::numeric_limits<std::size_t>::max() / 2U
-             ? std::numeric_limits<std::size_t>::max()
-             : old_capacity * 2U);
+    const std::size_t increment = old_capacity == 0 ? 8U :
+        std::min(old_capacity, MamSeedStorage::kChunkSeeds);
+    if (increment > std::numeric_limits<std::size_t>::max() - old_capacity) {
+        throw AlignmentError("reference-MAM seed storage exceeds the size range");
+    }
+    const std::size_t new_capacity = old_capacity + increment;
     if (new_capacity == old_capacity) {
         throw AlignmentError("reference-MAM seed vector exceeds the size range");
     }
@@ -715,6 +755,13 @@ SufkitSeedIndex SufkitSeedIndex::Build(
         sufkit::SuffixArrayBuildStatistics phase_statistics;
         auto build_options = sufkit::FastSuffixArrayBuildOptions();
         build_options.threads = options.threads;
+        constexpr std::string_view encoding = RAMAG_INTERNAL_LCP_ENCODING;
+        if constexpr (encoding == "raw") {
+            build_options.lcp_storage = sufkit::SaLcpStoragePolicy::kRaw;
+        } else if constexpr (encoding == "byte-coded") {
+            build_options.lcp_storage = sufkit::SaLcpStoragePolicy::kByteCoded;
+        }
+
         const std::uint64_t reference_bases =
             SumBases(references, "reference");
         build_options.backend =
@@ -1393,6 +1440,24 @@ SufkitSeedResult SufkitSeedIndex::Enumerate(
             }
             result.statistics.raw_selected_seed_count =
                 result.statistics.mam_occurrence_count;
+            const auto observe_mam = [&](std::string stage) {
+                if(!options.resident_bytes_callback)return;
+                MemoryObservation sample;
+                sample.stage=std::move(stage);
+                sample.elapsed_seconds=ElapsedSeconds(enumeration_begin);
+                sample.rss_bytes=options.resident_bytes_callback();
+                sample.index_estimated_bytes=result.statistics.index.resident_core_bytes;
+                sample.seed_capacity_bytes=CheckedMultiply(result.seeds.capacity(),sizeof(Seed),"merged seed observation");
+                sample.auxiliary_capacity_bytes=workspace_baseline;
+                for(const auto& task:tasks) {
+                    for(const auto& chunk:task.seeds.chunks) {
+                        CheckedAccumulate(sample.seed_capacity_bytes,CheckedMultiply(chunk.capacity(),sizeof(Seed),"seed chunk observation"),"seed observation");
+                    }
+                    CheckedAccumulate(sample.auxiliary_capacity_bytes,CheckedMultiply(task.seeds.chunks.capacity(),sizeof(std::vector<Seed>),"chunk metadata observation"),"chunk metadata observation");
+                }
+                result.statistics.memory_observations.push_back(std::move(sample));
+            };
+            observe_mam("mam-tasks-completed");
             if (result_seed_count >
                 static_cast<std::uint64_t>(
                     std::numeric_limits<std::size_t>::max())) {
@@ -1413,16 +1478,19 @@ SufkitSeedResult SufkitSeedIndex::Enumerate(
                     "allocator-expanded merged seed storage");
             }
             for (MamTaskWorkspace& task : tasks) {
-                result.seeds.insert(
-                    result.seeds.end(),
-                    std::make_move_iterator(task.seeds.begin()),
-                    std::make_move_iterator(task.seeds.end()));
-                const std::uint64_t task_capacity_bytes = CheckedMultiply(
-                    task.seeds.capacity(), sizeof(Seed),
-                    "reference-MAM task seed capacity");
-                std::vector<Seed>().swap(task.seeds);
-                workspace_budget.Release(task_capacity_bytes);
+                for (auto& chunk : task.seeds.chunks) {
+                    result.seeds.insert(
+                        result.seeds.end(),
+                        std::make_move_iterator(chunk.begin()),
+                        std::make_move_iterator(chunk.end()));
+                    const std::uint64_t chunk_capacity_bytes = CheckedMultiply(
+                        chunk.capacity(), sizeof(Seed),
+                        "reference-MAM task seed chunk capacity");
+                    std::vector<Seed>().swap(chunk);
+                    workspace_budget.Release(chunk_capacity_bytes);
+                }
             }
+            observe_mam("mam-chunks-merged");
             result.statistics.mam_workspace_peak_bytes =
                 workspace_budget.Peak();
         } else {

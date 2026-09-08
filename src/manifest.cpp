@@ -412,6 +412,11 @@ std::string ManifestJson(const ManifestData& data) {
          << "    \"dp_extensions\": " << stats.dp_gap_count << "\n"
          << "  },\n"
          << "  \"stage_wall_seconds\": {\n";
+  const auto& pw=stats.pairwise;
+  output << "    \"pairwise_seed_grouping\": " << pw.seed_grouping_seconds << ",\n"
+         << "    \"pairwise_output_conversion\": " << pw.output_conversion_seconds;
+  if(!data.stage_wall_seconds.empty())output << ',';
+  output << '\n';
   std::size_t timing_index = 0;
   for (const auto& [name, seconds] : data.stage_wall_seconds) {
     output << "    " << Quote(name) << ": " << seconds;
@@ -420,7 +425,33 @@ std::string ManifestJson(const ManifestData& data) {
     }
     output << '\n';
   }
-  output << "  },\n"
+  output << "  },\n";
+  output << "  \"pairwise_statistics\": {"
+         << "\"global_ksw_calls\":" << pw.global_ksw_calls
+         << ",\"endpoint_ksw_calls\":" << pw.endpoint_ksw_calls
+         << ",\"global_ksw_cumulative_seconds\":" << pw.global_ksw_seconds
+         << ",\"endpoint_ksw_cumulative_seconds\":" << pw.endpoint_ksw_seconds
+         << ",\"link_candidate_checks\":" << pw.link_candidate_checks
+         << ",\"link_direct_attempts\":" << pw.link_direct_attempts
+         << ",\"link_fallback_attempts\":" << pw.link_fallback_attempts
+         << ",\"link_long_gap_rejections\":" << pw.link_long_gap_rejections
+         << ",\"link_closure_failures\":" << pw.link_closure_failures << "},\n";
+  output << "  \"memory_observations\": [\n";
+  for(size_t i=0;i<stats.memory_observations.size();++i) {
+    const auto& m=stats.memory_observations[i];
+    output << "    {\"stage\":" << Quote(m.stage)
+           << ",\"elapsed_seconds\":" << m.elapsed_seconds
+           << ",\"rss_bytes\":" << m.rss_bytes
+           << ",\"index_estimated_bytes\":" << m.index_estimated_bytes
+           << ",\"seed_capacity_bytes\":" << m.seed_capacity_bytes
+           << ",\"cluster_capacity_bytes\":" << m.cluster_capacity_bytes
+           << ",\"anchor_capacity_bytes\":" << m.anchor_capacity_bytes
+           << ",\"cigar_capacity_bytes\":" << m.cigar_capacity_bytes
+           << ",\"auxiliary_capacity_bytes\":" << m.auxiliary_capacity_bytes << '}';
+    if(i+1<stats.memory_observations.size())output << ',';
+    output << '\n';
+  }
+  output << "  ],\n"
          << "  \"stages\": [\n";
   timing_index = 0;
   for (const auto& [name, seconds] : data.stage_wall_seconds) {

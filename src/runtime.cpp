@@ -83,6 +83,8 @@ void InstallSignalHandlers() {
 #endif
 }
 
+std::uint64_t CurrentResidentBytes() { return CurrentRssBytes(); }
+
 void CheckInterruption(std::string_view stage) {
   const int value = static_cast<int>(requested_signal);
   if (value != 0) throw InterruptedError(value, std::string(stage));

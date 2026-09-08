@@ -12,6 +12,13 @@ set(RAMAG_EFFECTIVE_CXX_FLAGS
 
 include(CTest)
 include(GNUInstallDirs)
+set(RAMAG_INTERNAL_LCP_ENCODING "profile-default" CACHE STRING
+    "Internal index LCP storage: profile-default, raw, byte-coded")
+set_property(CACHE RAMAG_INTERNAL_LCP_ENCODING PROPERTY STRINGS profile-default raw byte-coded)
+mark_as_advanced(RAMAG_INTERNAL_LCP_ENCODING)
+if(NOT RAMAG_INTERNAL_LCP_ENCODING MATCHES "^(profile-default|raw|byte-coded)$")
+  message(FATAL_ERROR "Invalid RAMAG_INTERNAL_LCP_ENCODING: ${RAMAG_INTERNAL_LCP_ENCODING}")
+endif()
 set(RAMAG_INTERNAL_ALIGNMENT_CORE "legacy" CACHE STRING "Internal alignment core: legacy or pairwise")
 set_property(CACHE RAMAG_INTERNAL_ALIGNMENT_CORE PROPERTY STRINGS legacy pairwise)
 if(NOT RAMAG_INTERNAL_ALIGNMENT_CORE MATCHES "^(legacy|pairwise)$")
@@ -55,7 +62,7 @@ option(RAMAG_ENABLE_PINNED_DEPENDENCIES
 set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
     "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
-set(RAMAG_SUFKIT_COMMIT "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010"
+set(RAMAG_SUFKIT_COMMIT "f8c4c386ee883e45ad0f973efc4c8e1148b0068a"
     CACHE STRING "Required sufkit commit")
 set(RAMAG_SEQPRO_COMMIT "6781cadcf81a0da53d7573444594c1484947017c"
     CACHE STRING "Required SeqPro commit")
@@ -178,6 +185,7 @@ target_compile_definitions(
   PRIVATE
     RAMAG_CXX_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
     RAMAG_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+    RAMAG_INTERNAL_LCP_ENCODING="${RAMAG_INTERNAL_LCP_ENCODING}"
     RAMAG_COMPILE_FLAGS="${RAMAG_EFFECTIVE_CXX_FLAGS}"
     RAMAG_OPENMP_ENABLED=${RAMAG_OPENMP_ENABLED_VALUE}
     RAMAG_OPENMP_RUNTIME="${RAMAG_OPENMP_RUNTIME_NAME}"

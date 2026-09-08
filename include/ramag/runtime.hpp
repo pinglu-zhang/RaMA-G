@@ -19,6 +19,8 @@ class InterruptedError : public std::runtime_error {
   int signal_number_{};
 };
 
+// Current RSS, or zero when the platform cannot provide it.
+[[nodiscard]] std::uint64_t CurrentResidentBytes();
 void InstallSignalHandlers();
 void CheckInterruption(std::string_view stage);
 

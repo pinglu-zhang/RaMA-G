@@ -72,6 +72,8 @@ struct AlignmentOptions {
     std::function<void(std::string_view, std::uint64_t, std::uint64_t)>
         progress_callback;
     std::function<void(std::string_view)> interruption_callback;
+    // Optional host-supplied RSS sampler. The library does not inspect /proc.
+    std::function<std::uint64_t()> resident_bytes_callback;
 };
 
 struct AlignmentResult {

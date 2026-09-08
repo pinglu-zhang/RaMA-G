@@ -590,6 +590,9 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     std::uint32_t actual_threads = 1;
     AlignmentOptions alignment_options = spec.alignment;
     alignment_options.worker_threads = spec.threads;
+#if RAMAG_USE_PAIRWISE_CORE
+    alignment_options.resident_bytes_callback = CurrentResidentBytes;
+#endif
     alignment_options.progress_callback =
         [&](std::string_view phase, std::uint64_t completed,
             std::uint64_t total) {
@@ -609,6 +612,25 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     alignment_options.interruption_callback =
         [](std::string_view phase) { CheckInterruption(phase); };
     if (SufkitAdapterAvailable()) {
+      SufkitSeedResult seed_result;
+      RunStatistics seed_statistics;
+      const auto memory_begin = Clock::now();
+      const auto observe_index = [&](std::string phase, std::uint64_t index_bytes) {
+#if RAMAG_USE_PAIRWISE_CORE
+        MemoryObservation observation;
+        observation.stage = std::move(phase);
+        observation.elapsed_seconds = SecondsBetween(memory_begin, Clock::now());
+        observation.rss_bytes = CurrentResidentBytes();
+        observation.index_estimated_bytes = index_bytes;
+        observation.seed_capacity_bytes = seed_result.seeds.capacity() * sizeof(Seed);
+        seed_statistics.memory_observations.push_back(std::move(observation));
+#else
+        (void)phase; (void)index_bytes; (void)memory_begin;
+#endif
+      };
+      // Seeds and their statistics own all data needed by the alignment core.
+      // Release the full SA/ISA/LCP before allocating pairwise workspaces.
+      {
       const auto index_begin = Clock::now();
       const bool load_persistent_index = !spec.reference_index_path.empty();
       stage = load_persistent_index ? "index-load" : "index-build";
@@ -662,9 +684,13 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       stage = "seed-enumeration";
       progress.Stage(stage, 0,
                      static_cast<std::uint64_t>(query.sequences.size()));
-      auto seed_result = index.Enumerate(reference.sequences, query.sequences,
+      observe_index("index-ready", index.BuildStatistics().resident_core_bytes);
+      seed_result = index.Enumerate(reference.sequences, query.sequences,
                                          alignment_options);
-      RunStatistics seed_statistics;
+      seed_statistics.memory_observations.insert(seed_statistics.memory_observations.end(),
+          std::make_move_iterator(seed_result.statistics.memory_observations.begin()),
+          std::make_move_iterator(seed_result.statistics.memory_observations.end()));
+      observe_index("seeds-enumerated", index.BuildStatistics().resident_core_bytes);
       seed_statistics.mem_seed_count =
           seed_result.statistics.mem_occurrence_count;
       seed_statistics.mam_seed_count =
@@ -844,6 +870,8 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
                     ":sampling=" + std::to_string(index_stats.sampling_rate) +
                     ":acceleration=" + index_stats.acceleration;
       seeding_route = seed_result.statistics.actual_route;
+      }
+      observe_index("index-released", 0);
 #if RAMAG_USE_PAIRWISE_CORE
       result = AlignPairwiseFromSeeds(
 #else

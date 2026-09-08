@@ -87,7 +87,7 @@ The production build pins exact Git commits:
 
 | Dependency | Required identity |
 |---|---|
-| Sufkit | `50e2e5b82ec4dd451fd68d0f2cfcd29566c10010` (0.3.0) |
+| Sufkit | `f8c4c386ee883e45ad0f973efc4c8e1148b0068a` (0.3.0) |
 | SeqPro | `6781cadcf81a0da53d7573444594c1484947017c` |
 
 The default CMake route fetches these identities. Local sources can be supplied

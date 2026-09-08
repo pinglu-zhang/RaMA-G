@@ -156,7 +156,10 @@ std::string ValidateReferenceIndexBundle(const std::filesystem::path& index,
   // Format 1.4 / Fast full-SA compatibility is tested in both directions.
   constexpr std::string_view previous =
       "bdb67c6de5daddd8a005640de73d96549d2575f4";
-  if (creator != kRequiredSufkitCommit && creator != previous) {
+  constexpr std::string_view previous_parallel =
+      "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010";
+  if (creator != kRequiredSufkitCommit && creator != previous &&
+      creator != previous_parallel) {
     throw DependencyError("reference index was created by an incompatible Sufkit commit");
   }
   if (MarkerValue(complete, "schema_version", paths.complete) != "1" ||

@@ -80,7 +80,37 @@ struct AlignmentRecord {
 
 // Counts and timings that are intrinsic to the alignment core.  CLI/writer
 // layers may add their own provenance and output statistics to the manifest.
+// Stage samples, not simultaneous heap peaks. Capacities describe named
+// containers only; RSS includes the process and allocator. RSS=0 is unavailable.
+struct MemoryObservation {
+    std::string stage;
+    double elapsed_seconds{};
+    std::uint64_t rss_bytes{};
+    std::uint64_t index_estimated_bytes{};
+    std::uint64_t seed_capacity_bytes{};
+    std::uint64_t cluster_capacity_bytes{};
+    std::uint64_t anchor_capacity_bytes{};
+    std::uint64_t cigar_capacity_bytes{};
+    std::uint64_t auxiliary_capacity_bytes{};
+};
+struct PairwiseStatistics {
+    std::uint64_t global_ksw_calls{};
+    std::uint64_t endpoint_ksw_calls{};
+    double global_ksw_seconds{};
+    double endpoint_ksw_seconds{};
+    std::uint64_t link_candidate_checks{};
+    std::uint64_t link_direct_attempts{};
+    std::uint64_t link_fallback_attempts{};
+    std::uint64_t link_long_gap_rejections{};
+    std::uint64_t link_closure_failures{};
+    double seed_grouping_seconds{};
+    double output_conversion_seconds{};
+};
+
 struct RunStatistics {
+    std::vector<MemoryObservation> memory_observations;
+    PairwiseStatistics pairwise;
+
     std::uint64_t reference_contigs{};
     std::uint64_t query_contigs{};
     Length reference_bases{};

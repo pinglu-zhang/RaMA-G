@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <limits>
@@ -24,21 +25,34 @@ using int_t=int64_t; using uint_t=uint64_t;
 using Score_t=int64_t;
 using Coord_t=uint64_t; using Length_t=uint64_t; using ChrIndex=uint32_t;
 using CigarUnit=uint64_t; using Cigar_t=std::vector<CigarUnit>;
-enum Strand { FORWARD, REVERSE };
-struct Match {
- ChrIndex ref_chr_index; Coord_t ref_start; ChrIndex qry_chr_index; Coord_t qry_start;
- Length_t length; Strand orientation;
- Length_t match_len() const {return length;}
- Strand strand() const {return orientation;}
- void set_match_len(Length_t n) {length=n;}
+using Strand = ramag::Strand;
+constexpr Strand FORWARD = Strand::Forward;
+constexpr Strand REVERSE = Strand::Reverse;
+using Match = Seed;
+thread_local PairwiseStatistics* active_statistics = nullptr;
+struct StatisticsScope {
+    PairwiseStatistics* previous;
+    explicit StatisticsScope(PairwiseStatistics& value) : previous(active_statistics) { active_statistics=&value; }
+    ~StatisticsScope() { active_statistics=previous; }
+};
+struct KswCallTimer {
+    bool global;
+    std::chrono::steady_clock::time_point begin=std::chrono::steady_clock::now();
+    explicit KswCallTimer(bool is_global):global(is_global) {}
+    ~KswCallTimer() {
+        if(!active_statistics)return;
+        const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
+        if(global){++active_statistics->global_ksw_calls;active_statistics->global_ksw_seconds+=seconds;}
+        else{++active_statistics->endpoint_ksw_calls;active_statistics->endpoint_ksw_seconds+=seconds;}
+    }
 };
 using MatchVec=std::vector<Match>; using MatchCluster=MatchVec;
 using MatchClusterVec=std::vector<MatchCluster>;
 using MatchClusterVecPtr=std::shared_ptr<MatchClusterVec>;
-inline Coord_t start1(const Match& m){return m.ref_start;}
-inline Coord_t start2(const Match& m){return m.qry_start;}
-inline Length_t len1(const Match& m){return m.match_len();}
-inline Length_t len2(const Match& m){return m.match_len();}
+inline Coord_t start1(const Match& m){return m.reference_begin;}
+inline Coord_t start2(const Match& m){return m.query_begin;}
+inline Length_t len1(const Match& m){return m.length;}
+inline Length_t len2(const Match& m){return m.length;}
 inline int_t diag(const Match& m){return static_cast<int_t>(start2(m))-static_cast<int_t>(start1(m));}
 inline int_t diag_reverse(const Match& m){return -static_cast<int_t>(start2(m))-static_cast<int_t>(start1(m));}
 inline void releaseCluster(MatchVec& v){MatchVec().swap(v);}
@@ -56,11 +70,11 @@ struct SequenceManager {
 using ManagerVariant=std::variant<std::unique_ptr<SequenceManager>>;
 }
 struct Anchor {
-    ChrIndex ref_chr_index;
-    Coord_t  ref_start;
+    ChrIndex reference_id;
+    Coord_t  reference_begin;
     Length_t ref_len;
-    ChrIndex qry_chr_index;
-    Coord_t  qry_start;
+    ChrIndex query_id;
+    Coord_t  query_begin;
     Length_t qry_len;
 
     Strand strand;
@@ -74,14 +88,14 @@ struct Anchor {
 
     Anchor() = default;
 
-    Anchor(ChrIndex ref_chr, Coord_t ref_start, Length_t ref_len,
-        ChrIndex qry_chr, Coord_t qry_start, Length_t qry_len,
+    Anchor(ChrIndex ref_chr, Coord_t reference_begin, Length_t ref_len,
+        ChrIndex qry_chr, Coord_t query_begin, Length_t qry_len,
         Strand strand, uint_t align_len, uint_t aligned_base, Cigar_t cigar_str)
-        : ref_chr_index(ref_chr),
-        ref_start(ref_start),
+        : reference_id(ref_chr),
+        reference_begin(reference_begin),
         ref_len(ref_len),
-        qry_chr_index(qry_chr),
-        qry_start(qry_start),
+        query_id(qry_chr),
+        query_begin(query_begin),
         qry_len(qry_len),
         strand(strand),
         alignment_length(align_len),
@@ -92,8 +106,6 @@ struct Anchor {
 
 };
 
-using AnchorPtr = std::shared_ptr<Anchor>;
-using AnchorPtrVec = std::vector<AnchorPtr>;
 using AnchorVec = std::vector<Anchor>;
 class UnionFind
 {
@@ -395,13 +407,13 @@ bool UnionFind::unite(int_t a, int_t b) {
 
 // ────────────────────────────────────────────
 // filterAndMergeMatches：对 match 列表进行过滤与合并
-// 假设：matches 已按 qry_start 排序
+// 假设：matches 已按 query_begin 排序
 // 规则：
 // 1) 同一 diagonal 且同向同染色体：合并成更长 match，删除后者
 // 2) 同 ref 起点：根据重叠比例过滤较短者；同长时用 tentative 机制处理
 // 3) 同 qry 起点：同上
 // ────────────────────────────────────────────
-void filterAndMergeMatches(MatchVec& matches) {
+void filterAndMergeMatches(std::span<Match>& matches) {
     if (matches.empty()) return;
 
     const size_t N = matches.size();
@@ -412,53 +424,53 @@ void filterAndMergeMatches(MatchVec& matches) {
         if (!good[i]) continue;
 
         const Match& mi = matches[i];
-        int_t  i_diag = mi.qry_start - mi.ref_start;
-        Coord_t i_end = mi.qry_start + mi.match_len();  // i 在 query 维度的结束位置（开区间右端）
+        int_t  i_diag = mi.query_begin - mi.reference_begin;
+        Coord_t i_end = mi.query_begin + mi.length;  // i 在 query 维度的结束位置（开区间右端）
 
-        // 由于 matches 按 qry_start 排序，只需检查 qry_start <= i_end 的后续元素
-        for (size_t j = i + 1; j < N && matches[j].qry_start <= i_end; ++j) {
+        // 由于 matches 按 query_begin 排序，只需检查 query_begin <= i_end 的后续元素
+        for (size_t j = i + 1; j < N && matches[j].query_begin <= i_end; ++j) {
             if (!good[j]) continue;
 
             const Match& mj = matches[j];
-            int_t j_diag = static_cast<int_t>(mj.qry_start) - static_cast<int_t>(mj.ref_start);
+            int_t j_diag = static_cast<int_t>(mj.query_begin) - static_cast<int_t>(mj.reference_begin);
 
             // --- Case 1: 同一 diagonal（同一条对角线） ---
             // 条件：diag 相等 + strand 相等 + ref/qry 染色体一致
             if (i_diag == j_diag &&
-                mi.strand() == mj.strand() &&
-                mi.ref_chr_index == mj.ref_chr_index &&
-                mi.qry_chr_index == mj.qry_chr_index) {
+                mi.strand == mj.strand &&
+                mi.reference_id == mj.reference_id &&
+                mi.query_id == mj.query_id) {
 
                 // 合并为更长的：计算 mj 相对 mi 的延伸长度
-                Coord_t j_extent = mj.match_len() + mj.qry_start - mi.qry_start;
-                if (j_extent > matches[i].match_len()) {
-                    matches[i].set_match_len(j_extent);
-                    i_end = mi.qry_start + j_extent;
+                Coord_t j_extent = mj.length + mj.query_begin - mi.query_begin;
+                if (j_extent > matches[i].length) {
+                    matches[i].length = j_extent;
+                    i_end = mi.query_begin + j_extent;
                 }
                 good[j] = false; // 删除 mj
             }
 
             // --- Case 2: 同一 ref 起点 ---
-            else if (mi.ref_start == mj.ref_start &&
-                     mi.ref_chr_index == mj.ref_chr_index) {
+            else if (mi.reference_begin == mj.reference_begin &&
+                     mi.reference_id == mj.reference_id) {
 
-                int_t overlap = mi.qry_start + mi.match_len() - mj.qry_start;
+                int_t overlap = mi.query_begin + mi.length - mj.query_begin;
 
-                if (mi.match_len() < mj.match_len()) {
+                if (mi.length < mj.length) {
                     // i 更短：若重叠超过 i 一半，丢弃 i
-                    if (overlap >= static_cast<int_t>(mi.match_len() / 2)) {
+                    if (overlap >= static_cast<int_t>(mi.length / 2)) {
                         good[i] = false;
                         break;
                     }
                 }
-                else if (mj.match_len() < mi.match_len()) {
+                else if (mj.length < mi.length) {
                     // j 更短：若重叠超过 j 一半，丢弃 j
-                    if (overlap >= static_cast<int_t>(mj.match_len() / 2))
+                    if (overlap >= static_cast<int_t>(mj.length / 2))
                         good[j] = false;
                 }
                 else {
                     // 长度相等：若重叠超过一半，标记 tentative
-                    if (overlap >= static_cast<int_t>(mi.match_len() / 2)) {
+                    if (overlap >= static_cast<int_t>(mi.length / 2)) {
                         tentative[j] = true;
                         if (tentative[i]) {
                             // 如果 i 也已被 tentative，则丢弃 i
@@ -470,25 +482,25 @@ void filterAndMergeMatches(MatchVec& matches) {
             }
 
             // --- Case 3: 同一 qry 起点 ---
-            else if (mi.qry_start == mj.qry_start &&
-                     mi.qry_chr_index == mj.qry_chr_index) {
+            else if (mi.query_begin == mj.query_begin &&
+                     mi.query_id == mj.query_id) {
 
-                int64_t overlap = static_cast<int64_t>(mi.ref_start) +
-                                  static_cast<int64_t>(mi.match_len()) -
-                                  static_cast<int64_t>(mj.ref_start);
+                int64_t overlap = static_cast<int64_t>(mi.reference_begin) +
+                                  static_cast<int64_t>(mi.length) -
+                                  static_cast<int64_t>(mj.reference_begin);
 
-                if (mi.match_len() < mj.match_len()) {
-                    if (overlap >= static_cast<int64_t>(mi.match_len() / 2)) {
+                if (mi.length < mj.length) {
+                    if (overlap >= static_cast<int64_t>(mi.length / 2)) {
                         good[i] = false;
                         break;
                     }
                 }
-                else if (mj.match_len() < mi.match_len()) {
-                    if (overlap >= static_cast<int64_t>(mj.match_len() / 2))
+                else if (mj.length < mi.length) {
+                    if (overlap >= static_cast<int64_t>(mj.length / 2))
                         good[j] = false;
                 }
                 else {
-                    if (overlap >= static_cast<int64_t>(mi.match_len() / 2)) {
+                    if (overlap >= static_cast<int64_t>(mi.length / 2)) {
                         tentative[j] = true;
                         if (tentative[i]) {
                             good[i] = false;
@@ -501,12 +513,11 @@ void filterAndMergeMatches(MatchVec& matches) {
     }
 
     // 收集 good 的 matches，生成新数组
-    MatchVec filtered;
-    filtered.reserve(matches.size());
+    size_t retained = 0;
     for (size_t i = 0; i < N; ++i) {
-        if (good[i]) filtered.push_back(matches[i]);
+        if (good[i]) matches[retained++] = matches[i];
     }
-    matches.swap(filtered);
+    matches = matches.first(retained);
 }
 
 // ────────────────────────────────────────────
@@ -518,7 +529,7 @@ void filterAndMergeMatches(MatchVec& matches) {
 //    且 diagonal 差 <= max(diagdiff, diagfactor * sep)，则归为一类
 // 4) 最后根据并查集根构建簇列表
 // ────────────────────────────────────────────
-MatchClusterVec buildClusters(MatchVec& unique_match,
+MatchClusterVec buildClusters(std::span<Match> unique_match,
                              int_t  max_gap,
                              int_t  diagdiff,
                              double diagfactor) {
@@ -534,7 +545,7 @@ MatchClusterVec buildClusters(MatchVec& unique_match,
     }
 
     // 判断链方向（假设同一批次一致）
-    const bool is_forward = (unique_match.front().strand() == FORWARD);
+    const bool is_forward = (unique_match.front().strand == FORWARD);
 
     // 先排序：按 start2 再按 start1
     std::sort(unique_match.begin(), unique_match.end(),
@@ -625,7 +636,7 @@ MatchVec bestChainDP(MatchVec& cluster, double diagfactor) {
     if (cluster.empty()) return {};
     if (cluster.size() == 1) return MatchVec{cluster.front()};
 
-    Strand strand = cluster.front().strand();
+    Strand strand = cluster.front().strand;
 
     std::sort(cluster.begin(), cluster.end(),
         [](const Match& a, const Match& b) { return start2(a) < start2(b); });
@@ -678,7 +689,7 @@ MatchVec bestChainDP(MatchVec& cluster, double diagfactor) {
 
     return chain;
 }
-MatchClusterVecPtr clusterChrMatch(MatchVec& unique_match,
+MatchClusterVecPtr clusterChrMatch(std::span<Match> unique_match,
                                   uint_t min_cluster_length,
                                   int_t  max_gap,
                                   int_t  diagdiff,
@@ -694,8 +705,8 @@ MatchClusterVecPtr clusterChrMatch(MatchVec& unique_match,
     MatchClusterVec clusters = buildClusters(unique_match, max_gap, diagdiff, diagfactor);
 
     // 释放 unique_match 的内存（保持原逻辑）
-    unique_match.clear();
-    unique_match.shrink_to_fit();
+    // The owning Seed vector is released once all disjoint groups finish.
+    unique_match = {};
 
     best_chain_clusters->reserve(clusters.size());
 
@@ -713,7 +724,7 @@ MatchClusterVecPtr clusterChrMatch(MatchVec& unique_match,
         uint_t span = 0;
         // 遍历 best_chain 累加 span（保持原逻辑）
         for (auto& m : best_chain) {
-            span += m.match_len();
+            span += m.length;
         }
 
         // 满足最小簇长度才保留
@@ -973,6 +984,8 @@ GlobalKswRun runGlobalKsw(
     const KSW2AlignConfig& config,
     int band_width) {
     ksw_extz_t result{};
+    {
+    KswCallTimer timer(true);
     ksw_extz2_sse(
         nullptr,
         static_cast<int>(query.size()), query.data(),
@@ -981,7 +994,9 @@ GlobalKswRun runGlobalKsw(
         config.gap_open, config.gap_extend,
         band_width, config.zdrop, config.end_bonus,
         config.flag, &result);
+    }
 
+    const std::unique_ptr<std::uint32_t, decltype(&std::free)> cigar_owner(result.cigar, &std::free);
     GlobalKswRun run;
     run.score = result.score;
     run.cigar.reserve(result.n_cigar);
@@ -995,7 +1010,7 @@ GlobalKswRun runGlobalKsw(
         if (operation != 2) run.summary.query_length += length;
         if (operation == 0) run.summary.match_length += length;
     }
-    free(result.cigar);
+    // cigar_owner releases KSW2 storage on success and allocation/validation failure.
     return run;
 }
 
@@ -1253,6 +1268,8 @@ static AlignmentResult extendAlignKSW2Impl(
 
     /* ---------- 3. 调用 KSW2 ---------- */
     ksw_extz_t ez{};
+    {
+    KswCallTimer timer(false);
     ksw_extz2_sse(nullptr,
         static_cast<int>(qry_enc.size()), qry_enc.data(),
         static_cast<int>(ref_enc.size()), ref_enc.data(),
@@ -1260,11 +1277,12 @@ static AlignmentResult extendAlignKSW2Impl(
         cfg.gap_open, cfg.gap_extend,
         cfg.band_width, cfg.zdrop, cfg.end_bonus,
         cfg.flag, &ez);
+    }
 
     // 赋值bool& if_zdrop,int& ref_end,int& qry_end
     /* ---------- 4. 拷贝 & 释放 ---------- */
+    const std::unique_ptr<std::uint32_t, decltype(&std::free)> cigar_owner(ez.cigar, &std::free);
     AlignmentResult result = copyKswResultAndSummarize(ez);
-    free(ez.cigar);                    // ksw2 使用 malloc
     return result;
 }
 
@@ -1346,16 +1364,16 @@ Anchor extendClusterToAnchor(MatchCluster& cluster,
     Anchor anchor;
     const Match& first = cluster.front();
 
-    Strand strand = first.strand();
+    Strand strand = first.strand;
     bool   fwd = (strand == FORWARD);
 
     if (!fwd) {
         std::sort(cluster.begin(), cluster.end(),
-            [](auto& a, auto& b) { return a.ref_start < b.ref_start; });
+            [](auto& a, auto& b) { return a.reference_begin < b.reference_begin; });
     }
 
-    ChrIndex ref_chr = first.ref_chr_index;
-    ChrIndex qry_chr = first.qry_chr_index;
+    ChrIndex ref_chr = first.reference_id;
+    ChrIndex qry_chr = first.query_id;
 
     Cigar_t cigar; cigar.reserve(cluster.size() * 2);  // 预估
     Coord_t aln_len = 0;
@@ -1366,8 +1384,8 @@ Anchor extendClusterToAnchor(MatchCluster& cluster,
         const Match& m = cluster[i];
 
 		uint_t len = len1(m);
-        uint_t ref_start = m.ref_start + len;
-        uint_t qry_start = m.qry_start + len;
+        uint_t reference_begin = m.reference_begin + len;
+        uint_t query_begin = m.query_begin + len;
 
         appendCigarOp(cigar, 'M', len);
         aln_len += len;
@@ -1377,21 +1395,21 @@ Anchor extendClusterToAnchor(MatchCluster& cluster,
 
         const Match& nxt = cluster[i + 1];
         uint_t len2 = len1(nxt);
-		uint_t ref_end = nxt.ref_start;
-		uint_t qry_end = nxt.qry_start;
+		uint_t ref_end = nxt.reference_begin;
+		uint_t qry_end = nxt.query_begin;
         Coord_t query_gap_begin = 0;
         Coord_t query_gap_length = 0;
         if (fwd) {
-            query_gap_begin = qry_start;
-            query_gap_length = qry_end - qry_start;
+            query_gap_begin = query_begin;
+            query_gap_length = qry_end - query_begin;
         }
         else {
             query_gap_begin = qry_end + len2;
-            query_gap_length = m.qry_start - len2 - qry_end;
+            query_gap_length = m.query_begin - len2 - qry_end;
         }
 
-        loadSequenceSlice(ref_mgr, ref_chr, ref_start,
-            ref_end - ref_start, false, reference_slice);
+        loadSequenceSlice(ref_mgr, ref_chr, reference_begin,
+            ref_end - reference_begin, false, reference_slice);
         loadSequenceSlice(query_mgr, qry_chr, query_gap_begin,
             query_gap_length, !fwd, query_slice);
         AlignmentResult gap = globalAlignKSW2Result(
@@ -1403,10 +1421,10 @@ Anchor extendClusterToAnchor(MatchCluster& cluster,
     }
 	const Match& last = cluster.back();
     if (fwd) {
-        anchor = Anchor(ref_chr, first.ref_start, last.ref_start + last.match_len() - first.ref_start, qry_chr, first.qry_start, last.qry_start + last.match_len() - first.qry_start, strand, aln_len, match_len, std::move(cigar));
+        anchor = Anchor(ref_chr, first.reference_begin, last.reference_begin + last.length - first.reference_begin, qry_chr, first.query_begin, last.query_begin + last.length - first.query_begin, strand, aln_len, match_len, std::move(cigar));
     }
     else {
-        anchor = Anchor(ref_chr, first.ref_start, last.ref_start + last.match_len() - first.ref_start, qry_chr, last.qry_start, first.qry_start + first.match_len() - last.qry_start, strand, aln_len, match_len, std::move(cigar));
+        anchor = Anchor(ref_chr, first.reference_begin, last.reference_begin + last.length - first.reference_begin, qry_chr, last.query_begin, first.query_begin + first.length - last.query_begin, strand, aln_len, match_len, std::move(cigar));
     }
 
     return anchor;
@@ -1442,7 +1460,7 @@ std::vector<ComponentRange> splitAnchorComponents(
     const AnchorVec& anchors,
     Statistics* statistics = nullptr);
 
-AnchorPtrVec linkAnchorRange(
+AnchorVec linkAnchorRange(
     AnchorVec& anchors,
     size_t begin,
     size_t end,
@@ -1497,7 +1515,7 @@ AnchorVec materializeClusterAnchors(
             if (left.empty() || right.empty()) {
                 return left.size() < right.size();
             }
-            return left.front().ref_start < right.front().ref_start;
+            return left.front().reference_begin < right.front().reference_begin;
         });
 
     MatchClusterVec cleaned;
@@ -1514,8 +1532,8 @@ AnchorVec materializeClusterAnchors(
         Coord_t low = std::numeric_limits<Coord_t>::max();
         Coord_t high = 0;
         for (const auto& match : cluster) {
-            const Coord_t first = match.qry_start;
-            const Coord_t second = match.qry_start + len2(match);
+            const Coord_t first = match.query_begin;
+            const Coord_t second = match.query_begin + len2(match);
             low = std::min(low, std::min(first, second));
             high = std::max(high, std::max(first, second));
         }
@@ -1526,14 +1544,14 @@ AnchorVec materializeClusterAnchors(
     for (auto& cluster : clusters) {
         if (cluster.empty()) continue;
         if (!have_previous ||
-            cluster.front().ref_chr_index != previous_ref_chromosome ||
-            cluster.front().qry_chr_index != previous_query_chromosome ||
-            cluster.front().strand() != previous_strand) {
+            cluster.front().reference_id != previous_ref_chromosome ||
+            cluster.front().query_id != previous_query_chromosome ||
+            cluster.front().strand != previous_strand) {
             MatchCluster kept = std::move(cluster);
-            previous_ref_chromosome = kept.front().ref_chr_index;
-            previous_query_chromosome = kept.front().qry_chr_index;
-            previous_strand = kept.front().strand();
-            previous_ref_end = kept.back().ref_start + len1(kept.back());
+            previous_ref_chromosome = kept.front().reference_id;
+            previous_query_chromosome = kept.front().query_id;
+            previous_strand = kept.front().strand;
+            previous_ref_end = kept.back().reference_begin + len1(kept.back());
             const auto [low, high] = query_bounds(kept);
             previous_query_low = low;
             previous_query_high = high;
@@ -1545,9 +1563,9 @@ AnchorVec materializeClusterAnchors(
         MatchCluster pruned;
         pruned.reserve(cluster.size());
         for (auto& match : cluster) {
-            const bool reference_ok = match.ref_start >= previous_ref_end;
-            const Coord_t first = match.qry_start;
-            const Coord_t second = match.qry_start + len2(match);
+            const bool reference_ok = match.reference_begin >= previous_ref_end;
+            const Coord_t first = match.query_begin;
+            const Coord_t second = match.query_begin + len2(match);
             const Coord_t low = std::min(first, second);
             const Coord_t high = std::max(first, second);
             const bool query_ok = !intervalOverlap(
@@ -1557,7 +1575,7 @@ AnchorVec materializeClusterAnchors(
             }
         }
         if (pruned.empty()) continue;
-        previous_ref_end = pruned.back().ref_start + len1(pruned.back());
+        previous_ref_end = pruned.back().reference_begin + len1(pruned.back());
         const auto [low, high] = query_bounds(pruned);
         previous_query_low = low;
         previous_query_high = high;
@@ -1585,7 +1603,7 @@ std::vector<ComponentRange> splitAnchorComponents(
     if (anchors.empty()) return components;
     size_t begin = 0;
     uint64_t prefix_maximum_end =
-        static_cast<uint64_t>(anchors.front().ref_start) +
+        static_cast<uint64_t>(anchors.front().reference_begin) +
         anchors.front().ref_len;
     const auto append_component = [&](size_t first, size_t last) {
         const uint64_t length = last - first;
@@ -1595,19 +1613,19 @@ std::vector<ComponentRange> splitAnchorComponents(
         for (size_t index = first + 1; index < last; ++index) {
             const Anchor& previous = anchors[index - 1];
             const Anchor& current = anchors[index];
-            if (previous.ref_chr_index != current.ref_chr_index ||
-                previous.qry_chr_index != current.qry_chr_index ||
+            if (previous.reference_id != current.reference_id ||
+                previous.query_id != current.query_id ||
                 previous.strand != current.strand) {
                 continue;
             }
-            const int64_t ref_gap = static_cast<int64_t>(current.ref_start) -
-                static_cast<int64_t>(previous.ref_start + previous.ref_len);
+            const int64_t ref_gap = static_cast<int64_t>(current.reference_begin) -
+                static_cast<int64_t>(previous.reference_begin + previous.ref_len);
             const int64_t query_gap = current.strand == FORWARD
-                ? static_cast<int64_t>(current.qry_start) -
+                ? static_cast<int64_t>(current.query_begin) -
                     static_cast<int64_t>(
-                        previous.qry_start + previous.qry_len)
-                : static_cast<int64_t>(previous.qry_start) -
-                    static_cast<int64_t>(current.qry_start + current.qry_len);
+                        previous.query_begin + previous.qry_len)
+                : static_cast<int64_t>(previous.query_begin) -
+                    static_cast<int64_t>(current.query_begin + current.qry_len);
             if (ref_gap < 0 || query_gap < 0 ||
                 !linkedGapCanBeAligned(
                     static_cast<Coord_t>(ref_gap),
@@ -1625,10 +1643,10 @@ std::vector<ComponentRange> splitAnchorComponents(
         const Anchor& previous = anchors[index - 1];
         const Anchor& current = anchors[index];
         const bool key_changed =
-            previous.ref_chr_index != current.ref_chr_index ||
-            previous.qry_chr_index != current.qry_chr_index ||
+            previous.reference_id != current.reference_id ||
+            previous.query_id != current.query_id ||
             previous.strand != current.strand;
-        const uint64_t current_start = current.ref_start;
+        const uint64_t current_start = current.reference_begin;
         const bool separated = current_start > prefix_maximum_end &&
             current_start - prefix_maximum_end >
                 kMaximumLinkedGapAlignmentLength;
@@ -1642,18 +1660,18 @@ std::vector<ComponentRange> splitAnchorComponents(
             append_component(begin, index);
             begin = index;
             prefix_maximum_end =
-                static_cast<uint64_t>(current.ref_start) + current.ref_len;
+                static_cast<uint64_t>(current.reference_begin) + current.ref_len;
         } else {
             prefix_maximum_end = std::max<uint64_t>(
                 prefix_maximum_end,
-                static_cast<uint64_t>(current.ref_start) + current.ref_len);
+                static_cast<uint64_t>(current.reference_begin) + current.ref_len);
         }
     }
     append_component(begin, anchors.size());
     return components;
 }
 
-AnchorPtrVec linkAnchorRange(
+AnchorVec linkAnchorRange(
     AnchorVec& anchors,
     size_t begin,
     size_t end,
@@ -1663,7 +1681,7 @@ AnchorPtrVec linkAnchorRange(
     if (begin > end || end > anchors.size()) {
         throw std::out_of_range("Invalid Anchor linking component range");
     }
-    AnchorPtrVec output;
+    AnchorVec output;
     if (begin == end) return output;
     std::vector<size_t> linked;
     linked.reserve(end - begin);
@@ -1691,13 +1709,13 @@ AnchorPtrVec linkAnchorRange(
             if (candidate.is_linked) continue;
             ++looked;
             if (statistics) ++statistics->candidate_checks;
-            const int_t ref_gap = static_cast<int_t>(candidate.ref_start) -
-                static_cast<int_t>(current.ref_start + current.ref_len);
+            const int_t ref_gap = static_cast<int_t>(candidate.reference_begin) -
+                static_cast<int_t>(current.reference_begin + current.ref_len);
             const int_t query_gap = current.strand == FORWARD
-                ? static_cast<int_t>(candidate.qry_start) -
-                    static_cast<int_t>(current.qry_start + current.qry_len)
-                : static_cast<int_t>(current.qry_start) -
-                    static_cast<int_t>(candidate.qry_start + candidate.qry_len);
+                ? static_cast<int_t>(candidate.query_begin) -
+                    static_cast<int_t>(current.query_begin + current.qry_len)
+                : static_cast<int_t>(current.query_begin) -
+                    static_cast<int_t>(candidate.query_begin + candidate.qry_len);
             if (ref_gap < 0 || query_gap < 0) continue;
             const long greater = std::max(ref_gap, query_gap);
             const long lesser = std::min(ref_gap, query_gap);
@@ -1716,16 +1734,16 @@ AnchorPtrVec linkAnchorRange(
         bool reached = false;
         if (best_index != kNoIndex) {
             Anchor& best = anchors[best_index];
-            const Coord_t ref_gap_begin = current.ref_start + current.ref_len;
-            const Coord_t ref_gap_length = best.ref_start - ref_gap_begin;
+            const Coord_t ref_gap_begin = current.reference_begin + current.ref_len;
+            const Coord_t ref_gap_length = best.reference_begin - ref_gap_begin;
             Coord_t query_gap_begin = 0;
             Coord_t query_gap_length = 0;
             if (current.strand == FORWARD) {
-                query_gap_begin = current.qry_start + current.qry_len;
-                query_gap_length = best.qry_start - query_gap_begin;
+                query_gap_begin = current.query_begin + current.qry_len;
+                query_gap_length = best.query_begin - query_gap_begin;
             } else {
-                query_gap_begin = best.qry_start + best.qry_len;
-                query_gap_length = current.qry_start - query_gap_begin;
+                query_gap_begin = best.query_begin + best.qry_len;
+                query_gap_length = current.query_begin - query_gap_begin;
             }
 
             const bool alignable = linkedGapCanBeAligned(
@@ -1740,9 +1758,9 @@ AnchorPtrVec linkAnchorRange(
                         statistics->estimated_ksw_cells,
                         estimatedGapCells(ref_gap_length, query_gap_length));
                 }
-                loadSequenceSlice(ref_mgr, current.ref_chr_index,
+                loadSequenceSlice(ref_mgr, current.reference_id,
                     ref_gap_begin, ref_gap_length, false, reference_slice);
-                loadSequenceSlice(qry_mgr, current.qry_chr_index,
+                loadSequenceSlice(qry_mgr, current.query_id,
                     query_gap_begin, query_gap_length,
                     current.strand == REVERSE, query_slice);
                 AlignmentResult gap = extendAlignKSW2Result(
@@ -1751,15 +1769,15 @@ AnchorPtrVec linkAnchorRange(
                 if (gap.summary.reference_length == ref_gap_length &&
                     gap.summary.query_length == query_gap_length) {
                     reached = true;
-                    current.ref_len = best.ref_start + best.ref_len -
-                        current.ref_start;
+                    current.ref_len = best.reference_begin + best.ref_len -
+                        current.reference_begin;
                     if (current.strand == FORWARD) {
-                        current.qry_len = best.qry_start + best.qry_len -
-                            current.qry_start;
+                        current.qry_len = best.query_begin + best.qry_len -
+                            current.query_begin;
                     } else {
-                        current.qry_len = current.qry_start + current.qry_len -
-                            best.qry_start;
-                        current.qry_start = best.qry_start;
+                        current.qry_len = current.query_begin + current.qry_len -
+                            best.query_begin;
+                        current.query_begin = best.query_begin;
                     }
                     current.cigar.reserve(current.cigar.size() +
                         gap.cigar.size() + best.cigar.size());
@@ -1770,6 +1788,8 @@ AnchorPtrVec linkAnchorRange(
                     current.aligned_base += gap.summary.match_length +
                         best.aligned_base;
                     best.is_linked = true;
+                } else if(active_statistics) {
+                    ++active_statistics->link_closure_failures;
                 }
             }
         }
@@ -1785,20 +1805,20 @@ AnchorPtrVec linkAnchorRange(
                     const Anchor& previous = anchors[linked[position - 1]];
                     if (statistics) ++statistics->candidate_checks;
                     if (previous.strand != current.strand ||
-                        previous.ref_chr_index != current.ref_chr_index ||
-                        previous.qry_chr_index != current.qry_chr_index) {
+                        previous.reference_id != current.reference_id ||
+                        previous.query_id != current.query_id) {
                         continue;
                     }
-                    const int_t ref_gap = static_cast<int_t>(current.ref_start) -
+                    const int_t ref_gap = static_cast<int_t>(current.reference_begin) -
                         static_cast<int_t>(
-                            previous.ref_start + previous.ref_len);
+                            previous.reference_begin + previous.ref_len);
                     const int_t query_gap = current.strand == FORWARD
-                        ? static_cast<int_t>(current.qry_start) -
+                        ? static_cast<int_t>(current.query_begin) -
                             static_cast<int_t>(
-                                previous.qry_start + previous.qry_len)
-                        : static_cast<int_t>(previous.qry_start) -
+                                previous.query_begin + previous.qry_len)
+                        : static_cast<int_t>(previous.query_begin) -
                             static_cast<int_t>(
-                                current.qry_start + current.qry_len);
+                                current.query_begin + current.qry_len);
                     if (ref_gap < 0 || query_gap < 0) continue;
                     const bool alignable = linkedGapCanBeAligned(
                         static_cast<Coord_t>(ref_gap),
@@ -1818,17 +1838,17 @@ AnchorPtrVec linkAnchorRange(
                     const Anchor& previous =
                         anchors[linked[best_linked_position]];
                     const Coord_t ref_gap_begin =
-                        previous.ref_start + previous.ref_len;
+                        previous.reference_begin + previous.ref_len;
                     const Coord_t ref_gap_length =
-                        current.ref_start - ref_gap_begin;
+                        current.reference_begin - ref_gap_begin;
                     Coord_t query_gap_begin = 0;
                     Coord_t query_gap_length = 0;
                     if (current.strand == FORWARD) {
-                        query_gap_begin = previous.qry_start + previous.qry_len;
-                        query_gap_length = current.qry_start - query_gap_begin;
+                        query_gap_begin = previous.query_begin + previous.qry_len;
+                        query_gap_length = current.query_begin - query_gap_begin;
                     } else {
-                        query_gap_begin = current.qry_start + current.qry_len;
-                        query_gap_length = previous.qry_start - query_gap_begin;
+                        query_gap_begin = current.query_begin + current.qry_len;
+                        query_gap_length = previous.query_begin - query_gap_begin;
                     }
                     if (statistics) {
                         statistics->sequence_extractions += 2;
@@ -1838,9 +1858,9 @@ AnchorPtrVec linkAnchorRange(
                             estimatedGapCells(
                                 ref_gap_length, query_gap_length));
                     }
-                    loadSequenceSlice(ref_mgr, current.ref_chr_index,
+                    loadSequenceSlice(ref_mgr, current.reference_id,
                         ref_gap_begin, ref_gap_length, false, reference_slice);
-                    loadSequenceSlice(qry_mgr, current.qry_chr_index,
+                    loadSequenceSlice(qry_mgr, current.query_id,
                         query_gap_begin, query_gap_length,
                         current.strand == REVERSE, query_slice);
                     AlignmentResult gap = extendAlignKSW2Result(
@@ -1853,29 +1873,31 @@ AnchorPtrVec linkAnchorRange(
                         current.alignment_length +=
                             gap.summary.alignment_length;
                         current.aligned_base += gap.summary.match_length;
-                        current.ref_start -= gap.summary.reference_length;
+                        current.reference_begin -= gap.summary.reference_length;
                         if (current.strand == FORWARD) {
-                            current.qry_start -= gap.summary.query_length;
+                            current.query_begin -= gap.summary.query_length;
                         }
                         prependCigar(current.cigar, gap.cigar);
+                    } else if(active_statistics) {
+                        ++active_statistics->link_closure_failures;
                     }
                 }
             }
 
             linked.push_back(current_index);
-            const Coord_t current_ref_end = current.ref_start + current.ref_len;
+            const Coord_t current_ref_end = current.reference_begin + current.ref_len;
             const Coord_t current_query_end = current.strand == FORWARD
-                ? current.qry_start + current.qry_len
-                : current.qry_start;
+                ? current.query_begin + current.qry_len
+                : current.query_begin;
             const size_t stop = best_index == kNoIndex ? end : best_index;
             for (size_t index = current_index + 1; index < stop; ++index) {
                 Anchor& candidate = anchors[index];
                 if (candidate.is_linked) continue;
                 const Coord_t candidate_ref_end =
-                    candidate.ref_start + candidate.ref_len;
+                    candidate.reference_begin + candidate.ref_len;
                 const Coord_t candidate_query_end = current.strand == FORWARD
-                    ? candidate.qry_start + candidate.qry_len
-                    : candidate.qry_start;
+                    ? candidate.query_begin + candidate.qry_len
+                    : candidate.query_begin;
                 if (candidate_ref_end <= current_ref_end &&
                     ((current.strand == FORWARD &&
                       candidate_query_end <= current_query_end) ||
@@ -1888,7 +1910,7 @@ AnchorPtrVec linkAnchorRange(
             while (current_index < end) {
                 const Anchor& candidate = anchors[current_index];
                 if (!candidate.is_linked &&
-                    candidate.ref_start >= current_ref_end) {
+                    candidate.reference_begin >= current_ref_end) {
                     break;
                 }
                 ++current_index;
@@ -1899,7 +1921,7 @@ AnchorPtrVec linkAnchorRange(
     output.reserve(linked.size());
     for (const size_t index : linked) {
         anchors[index].is_linked = false;
-        output.push_back(std::make_shared<Anchor>(std::move(anchors[index])));
+        output.push_back(std::move(anchors[index]));
     }
     return output;
 }
@@ -2104,12 +2126,12 @@ struct DpWorkspace {
 
 thread_local DpWorkspace retained_dp_workspace;
 
-void filterAnchorsByDpTreap(AnchorPtrVec result, bool filter_ref) {
+void filterAnchorsByDpTreap(std::span<size_t> result, AnchorVec& anchors, bool filter_ref) {
     if (result.empty()) return;
     std::sort(result.begin(), result.end(),
-        [filter_ref](const AnchorPtr& left, const AnchorPtr& right) {
-            return filter_ref ? left->ref_start < right->ref_start
-                              : left->qry_start < right->qry_start;
+        [filter_ref, &anchors](size_t left, size_t right) {
+            return filter_ref ? anchors[left].reference_begin < anchors[right].reference_begin
+                              : anchors[left].query_begin < anchors[right].query_begin;
         });
 
     DpWorkspace temporary_workspace;
@@ -2123,12 +2145,12 @@ void filterAnchorsByDpTreap(AnchorPtrVec result, bool filter_ref) {
     const auto interval = [&](size_t index) {
         if (filter_ref) {
             return std::pair<long long, long long>{
-                static_cast<long long>(result[index]->ref_start),
-                static_cast<long long>(result[index]->ref_len)};
+                static_cast<long long>(anchors[result[index]].reference_begin),
+                static_cast<long long>(anchors[result[index]].ref_len)};
         }
         return std::pair<long long, long long>{
-            static_cast<long long>(result[index]->qry_start),
-            static_cast<long long>(result[index]->qry_len)};
+            static_cast<long long>(anchors[result[index]].query_begin),
+            static_cast<long long>(anchors[result[index]].qry_len)};
     };
     const auto legacyPredecessor = [&](size_t current, double score) {
         const size_t begin = current > kDpWindow
@@ -2161,9 +2183,9 @@ void filterAnchorsByDpTreap(AnchorPtrVec result, bool filter_ref) {
     uint64_t local_fallbacks = 0;
     for (size_t index = 0; index < result.size(); ++index) {
         const double identity = static_cast<float>(
-            result[index]->aligned_base) /
-            result[index]->alignment_length;
-        const double score = result[index]->alignment_length *
+            anchors[result[index]].aligned_base) /
+            anchors[result[index]].alignment_length;
+        const double score = anchors[result[index]].alignment_length *
             pow(identity, 2);
         workspace.dp[index] = score;
 
@@ -2177,7 +2199,7 @@ void filterAnchorsByDpTreap(AnchorPtrVec result, bool filter_ref) {
         const DpTreapBest best = current_length == 0
             ? treap.bestAll()
             : treap.bestEndingAtOrBefore(current_start);
-        bool fallback = result[index]->alignment_length == 0 ||
+        bool fallback = anchors[result[index]].alignment_length == 0 ||
             !std::isfinite(score) ||
             (best.valid() && !std::isfinite(best.value));
         if (best.valid() && !fallback) {
@@ -2214,36 +2236,36 @@ void filterAnchorsByDpTreap(AnchorPtrVec result, bool filter_ref) {
     }
     for (int index = static_cast<int>(best_index); index >= 0;
          index = workspace.pre[index]) {
-        if (filter_ref) result[index]->ref_selected = true;
-        else result[index]->qry_selected = true;
+        if (filter_ref) anchors[result[index]].ref_selected = true;
+        else anchors[result[index]].qry_selected = true;
         if (workspace.pre[index] == -1) break;
     }
 }
 
-void filterAnchorsByDpLegacy(AnchorPtrVec result, bool filter_ref) {
+void filterAnchorsByDpLegacy(std::span<size_t> result, AnchorVec& anchors, bool filter_ref) {
     if (result.empty()) return;
     std::sort(result.begin(), result.end(),
-        [filter_ref](const AnchorPtr& left, const AnchorPtr& right) {
-            return filter_ref ? left->ref_start < right->ref_start
-                              : left->qry_start < right->qry_start;
+        [filter_ref, &anchors](size_t left, size_t right) {
+            return filter_ref ? anchors[left].reference_begin < anchors[right].reference_begin
+                              : anchors[left].query_begin < anchors[right].query_begin;
         });
     std::vector<double> dp(result.size(), 0);
     std::vector<int_t> pre(result.size(), -1);
     const auto interval = [&](size_t index) {
         if (filter_ref) {
             return std::pair<long long, long long>{
-                static_cast<long long>(result[index]->ref_start),
-                static_cast<long long>(result[index]->ref_len)};
+                static_cast<long long>(anchors[result[index]].reference_begin),
+                static_cast<long long>(anchors[result[index]].ref_len)};
         }
         return std::pair<long long, long long>{
-            static_cast<long long>(result[index]->qry_start),
-            static_cast<long long>(result[index]->qry_len)};
+            static_cast<long long>(anchors[result[index]].query_begin),
+            static_cast<long long>(anchors[result[index]].qry_len)};
     };
     for (size_t index = 0; index < result.size(); ++index) {
         const double identity = static_cast<float>(
-            result[index]->aligned_base) /
-            result[index]->alignment_length;
-        const double score = result[index]->alignment_length *
+            anchors[result[index]].aligned_base) /
+            anchors[result[index]].alignment_length;
+        const double score = anchors[result[index]].alignment_length *
             pow(identity, 2);
         dp[index] = score;
         const size_t begin = index > kDpWindow
@@ -2283,8 +2305,8 @@ void filterAnchorsByDpLegacy(AnchorPtrVec result, bool filter_ref) {
     }
     for (int index = static_cast<int>(best_index); index >= 0;
          index = pre[index]) {
-        if (filter_ref) result[index]->ref_selected = true;
-        else result[index]->qry_selected = true;
+        if (filter_ref) anchors[result[index]].ref_selected = true;
+        else anchors[result[index]].qry_selected = true;
         if (pre[index] == -1) break;
     }
 }
@@ -2334,16 +2356,16 @@ Sequences CheckSequences(std::span<const SequenceRecord> records) {
     return lookup;
 }
 char Complement(char base) {return pairwise_detail::BASE_COMPLEMENT[static_cast<unsigned char>(base)];}
-AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& refs,const Sequences& queries) {
+AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& refs,const Sequences& queries,bool materialize=true) {
     AlignmentRecord r;
-    r.reference_id=a.ref_chr_index; r.query_id=a.qry_chr_index;
-    r.reference_begin=a.ref_start; r.reference_end=a.ref_start+a.ref_len;
-    r.query_begin=a.qry_start; r.query_end=a.qry_start+a.qry_len;
+    r.reference_id=a.reference_id; r.query_id=a.query_id;
+    r.reference_begin=a.reference_begin; r.reference_end=a.reference_begin+a.ref_len;
+    r.query_begin=a.query_begin; r.query_end=a.query_begin+a.qry_len;
     r.strand=a.strand==pairwise_detail::FORWARD?Strand::Forward:Strand::Reverse;
     const auto& ref=refs.at(r.reference_id)->bases; const auto& qry=queries.at(r.query_id)->bases;
     if(r.reference_end>ref.size() || r.query_end>qry.size() || a.ref_len==0 || a.qry_len==0) throw AlignmentError("pairwise alignment span outside sequence");
     Length rp=r.reference_begin, qp=0;
-    const auto append=[&](char op,Length n){if(n==0) throw AlignmentError("pairwise zero CIGAR operation");if(!r.cigar.empty()&&r.cigar.back().operation==op)r.cigar.back().length+=n;else r.cigar.push_back({op,n});};
+    const auto append=[&](char op,Length n){if(n==0) throw AlignmentError("pairwise zero CIGAR operation");if(!materialize)return;if(!r.cigar.empty()&&r.cigar.back().operation==op)r.cigar.back().length+=n;else r.cigar.push_back({op,n});};
     for(auto unit:a.cigar) {
         const Length n=unit>>4; const auto op=unit&15;
         if(n==0 || (op!=0&&op!=1&&op!=2&&op!=7&&op!=8)) throw AlignmentError("pairwise invalid packed CIGAR");
@@ -2371,12 +2393,26 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
 }
 } // namespace
 
-PairwiseCoreResult AlignPairwiseCore(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::span<const Seed> seeds,const PairwiseCoreOptions& o) {
+static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::vector<Seed> seeds,const PairwiseCoreOptions& o,bool selected_only,std::uint64_t& candidate_count) {
     if(o.threads==0 || o.threads>static_cast<unsigned>(INT32_MAX) || o.min_cluster==0 || !std::isfinite(o.diag_factor) || o.diag_factor<0 || o.max_gap>static_cast<Length>(INT64_MAX/256) || o.diag_diff>static_cast<Length>(INT64_MAX/256)) throw AlignmentError("invalid pairwise core configuration");
     auto refs=CheckSequences(references), qrys=CheckSequences(queries);
     for(const auto& q:queries)if(static_cast<long double>(o.diag_factor)*q.size()>static_cast<long double>(INT64_MAX/2))throw AlignmentError("pairwise diagonal threshold cannot be represented");
+    const auto memory_begin=KernelClock::now();
+    PairwiseCoreResult result;
+    const auto observe=[&](std::string stage, std::uint64_t cluster_bytes=0,
+            std::uint64_t anchor_bytes=0, std::uint64_t cigar_bytes=0,
+            std::uint64_t auxiliary_bytes=0) {
+        MemoryObservation sample;
+        sample.stage=std::move(stage);sample.elapsed_seconds=Elapsed(memory_begin);
+        sample.rss_bytes=o.resident_bytes_callback?o.resident_bytes_callback():0;
+        sample.seed_capacity_bytes=seeds.capacity()*sizeof(Seed);
+        sample.cluster_capacity_bytes=cluster_bytes;sample.anchor_capacity_bytes=anchor_bytes;
+        sample.cigar_capacity_bytes=cigar_bytes;sample.auxiliary_capacity_bytes=auxiliary_bytes;
+        result.memory_observations.push_back(std::move(sample));
+    };
+    observe("core-seeds-owned");
     using Key=std::tuple<SequenceId,SequenceId,pairwise_detail::Strand>;
-    std::map<Key,pairwise_detail::MatchVec> buckets;
+
     KernelProgress(o,"seed-merge",0,seeds.size());
     for(const auto& s:seeds) {
         KernelCheck(o,"seed-merge");
@@ -2388,59 +2424,150 @@ PairwiseCoreResult AlignPairwiseCore(std::span<const SequenceRecord> references,
             const auto x=r[s.reference_begin+i];const auto y=s.strand==Strand::Forward?q[s.query_begin+i]:Complement(q[s.query_begin+s.length-i-1]);
             if(x=='N'||x!=y)throw AlignmentError("pairwise seed is not an exact canonical match");
         }
-        const auto strand=s.strand==Strand::Forward?pairwise_detail::FORWARD:pairwise_detail::REVERSE;
-        buckets[{s.reference_id,s.query_id,strand}].push_back({s.reference_id,s.reference_begin,s.query_id,s.query_begin,s.length,strand});
+
     }
-    std::vector<pairwise_detail::MatchVec> groups;
-    for(auto& [key,values]:buckets){(void)key;std::sort(values.begin(),values.end(),[](const auto& x,const auto& y){return std::tie(x.qry_start,x.ref_start,x.length)<std::tie(y.qry_start,y.ref_start,y.length);});groups.push_back(std::move(values));}
-    PairwiseCoreResult result;
+    const auto group_key=[](const Seed& seed) {
+        return Key{seed.reference_id,seed.query_id,seed.strand};
+    };
+    // Within a group this is the former bucket ordering, including length.
+    // Equivalent elements have identical Seed fields and are interchangeable.
+    std::sort(seeds.begin(),seeds.end(),[&](const Seed& a,const Seed& b) {
+        return std::tuple{group_key(a),a.query_begin,a.reference_begin,a.length}
+             < std::tuple{group_key(b),b.query_begin,b.reference_begin,b.length};
+    });
+    std::vector<std::span<Seed>> groups;
+    for(size_t begin=0;begin<seeds.size();) {
+        size_t end=begin+1;
+        while(end<seeds.size()&&group_key(seeds[end])==group_key(seeds[begin]))++end;
+        groups.emplace_back(seeds.data()+begin,end-begin);
+        begin=end;
+    }
+    result.statistics.seed_grouping_seconds=Elapsed(memory_begin);
+    observe("core-seeds-grouped",0,0,0,groups.capacity()*sizeof(std::span<Seed>));
     result.workers=std::min(o.threads,static_cast<std::uint32_t>(std::min<std::size_t>(groups.size(),UINT32_MAX)));
     KernelProgress(o,"chaining",0,groups.size());
     auto start=KernelClock::now();
     std::vector<pairwise_detail::MatchClusterVecPtr> clusters(groups.size());
     ParallelKernel(groups.size(),o,[&](std::size_t i){KernelCheck(o,"chaining");clusters[i]=pairwise_detail::clusterChrMatch(groups[i],o.min_cluster,static_cast<std::int64_t>(o.max_gap),static_cast<std::int64_t>(o.diag_diff),o.diag_factor);});
     result.clustering_seconds=Elapsed(start);
-    for(const auto& v:clusters)result.clusters+=v->size();
-    KernelProgress(o,"extension",0,groups.size());
+    const size_t group_count=groups.size();
+    // All span users have joined. Destroy views before releasing their owner.
+    decltype(groups)().swap(groups);
+    std::vector<Seed>().swap(seeds);
+    std::uint64_t cluster_bytes=0;
+    for(const auto& v:clusters) {
+        result.clusters+=v->size();
+        cluster_bytes+=v->capacity()*sizeof(pairwise_detail::MatchCluster);
+        for(const auto& c:*v)cluster_bytes+=c.capacity()*sizeof(Seed);
+    }
+    observe("core-clustered-seeds-released",cluster_bytes);
+    KernelProgress(o,"extension",0,group_count);
     start=KernelClock::now();
     pairwise_detail::SeqPro::ManagerVariant rm{std::make_unique<pairwise_detail::SeqPro::SequenceManager>(references)};
     pairwise_detail::SeqPro::ManagerVariant qm{std::make_unique<pairwise_detail::SeqPro::SequenceManager>(queries)};
-    std::vector<pairwise_detail::AnchorPtrVec> extended(groups.size());
-    ParallelKernel(groups.size(),o,[&](std::size_t i){
+    std::vector<pairwise_detail::AnchorVec> extended(group_count);
+    std::vector<PairwiseStatistics> group_statistics(group_count);
+    std::vector<pairwise_detail::AnchorLinkDetail::Statistics> link_statistics(group_count);
+    ParallelKernel(group_count,o,[&](std::size_t i){
         KernelCheck(o,"extension");
+        pairwise_detail::StatisticsScope statistics_scope(group_statistics[i]);
         auto anchors=pairwise_detail::AnchorLinkDetail::materializeClusterAnchors(*clusters[i],rm,qm);
-        const auto components=pairwise_detail::AnchorLinkDetail::splitAnchorComponents(anchors);
-        for(const auto& component:components){KernelCheck(o,"extension");auto output=pairwise_detail::AnchorLinkDetail::linkAnchorRange(anchors,component.begin,component.end,rm,qm);extended[i].insert(extended[i].end(),std::make_move_iterator(output.begin()),std::make_move_iterator(output.end()));}
+        clusters[i].reset();
+        const auto components=pairwise_detail::AnchorLinkDetail::splitAnchorComponents(anchors,&link_statistics[i]);
+        for(const auto& component:components){KernelCheck(o,"extension");auto output=pairwise_detail::AnchorLinkDetail::linkAnchorRange(anchors,component.begin,component.end,rm,qm,&link_statistics[i]);extended[i].insert(extended[i].end(),std::make_move_iterator(output.begin()),std::make_move_iterator(output.end()));}
     });
     result.extension_seconds=Elapsed(start);
+    std::uint64_t extended_bytes=0,packed_bytes=0;
+    for(const auto& group:extended) {
+        extended_bytes+=group.capacity()*sizeof(pairwise_detail::Anchor);
+        for(const auto& anchor:group)packed_bytes+=anchor.cigar.capacity()*sizeof(pairwise_detail::CigarUnit);
+    }
+    observe("core-extended",0,extended_bytes,packed_bytes);
+    for(size_t i=0;i<group_count;++i) {
+        const auto& g=group_statistics[i];const auto& l=link_statistics[i];auto& t=result.statistics;
+        t.global_ksw_calls+=g.global_ksw_calls;t.endpoint_ksw_calls+=g.endpoint_ksw_calls;
+        t.global_ksw_seconds+=g.global_ksw_seconds;t.endpoint_ksw_seconds+=g.endpoint_ksw_seconds;
+        t.link_closure_failures+=g.link_closure_failures;
+        t.link_candidate_checks+=l.candidate_checks;t.link_direct_attempts+=l.direct_ksw_calls;
+        t.link_fallback_attempts+=l.fallback_ksw_calls;t.link_long_gap_rejections+=l.long_gap_rejections;
+    }
     KernelProgress(o,"conflict-resolution",0,extended.size());
     start=KernelClock::now();
+    size_t total_anchors=0;
+    for(const auto& group:extended) {
+        if(group.size()>SIZE_MAX-total_anchors)throw AlignmentError("pairwise anchor count overflow");
+        total_anchors+=group.size();
+    }
+    pairwise_detail::AnchorVec anchors;
+    anchors.reserve(total_anchors);
+    for(auto& group:extended) {
+        anchors.insert(anchors.end(),std::make_move_iterator(group.begin()),std::make_move_iterator(group.end()));
+        pairwise_detail::AnchorVec().swap(group);
+    }
+    decltype(extended)().swap(extended);
+    decltype(clusters)().swap(clusters);
     for(bool reference_side:{true,false}) {
-        std::map<SequenceId,pairwise_detail::AnchorPtrVec> dimension;
-        for(const auto& group:extended)for(const auto& anchor:group)dimension[reference_side?anchor->ref_chr_index:anchor->qry_chr_index].push_back(anchor);
-        std::vector<pairwise_detail::AnchorPtrVec> tasks;
+        std::map<SequenceId,std::vector<size_t>> dimension;
+        for(size_t index=0;index<anchors.size();++index) {
+            const auto& anchor=anchors[index];
+            dimension[reference_side?anchor.reference_id:anchor.query_id].push_back(index);
+        }
+        std::vector<std::vector<size_t>> tasks;
         for(auto& [id,list]:dimension){(void)id;tasks.push_back(std::move(list));}
-        ParallelKernel(tasks.size(),o,[&](std::size_t i){KernelCheck(o,"conflict-resolution");pairwise_detail::filterAnchorsByDpTreap(tasks[i],reference_side);});
+        std::uint64_t task_bytes=tasks.capacity()*sizeof(std::vector<size_t>);
+        for(const auto& task:tasks)task_bytes+=task.capacity()*sizeof(size_t);
+        observe(reference_side?"core-reference-selection":"core-query-selection",0,
+            anchors.capacity()*sizeof(pairwise_detail::Anchor),packed_bytes,task_bytes);
+        ParallelKernel(tasks.size(),o,[&](std::size_t i){KernelCheck(o,"conflict-resolution");pairwise_detail::filterAnchorsByDpTreap(tasks[i],anchors,reference_side);});
     }
     result.selection_seconds=Elapsed(start);
-    for(const auto& group:extended)for(const auto& a:group){KernelCheck(o,"conflict-resolution");result.records.push_back({ConvertAnchor(*a,refs,qrys),a->ref_selected,a->qry_selected,a->aligned_base,a->alignment_length});}
+    observe("core-selected",0,anchors.capacity()*sizeof(pairwise_detail::Anchor),packed_bytes);
+    start=KernelClock::now();
+    candidate_count=anchors.size();
+    const auto output_count=static_cast<size_t>(std::count_if(anchors.begin(),anchors.end(),[&](const auto& a) {
+        return !selected_only||(a.ref_selected&&a.qry_selected);
+    }));
+    result.records.reserve(output_count);
+    for(auto& a:anchors) {
+        KernelCheck(o,"conflict-resolution");
+        const bool keep=!selected_only||(a.ref_selected&&a.qry_selected);
+        // Always validate complete packed CIGAR and sequence consumption.
+        auto record=ConvertAnchor(a,refs,qrys,keep);
+        if(keep)result.records.push_back({std::move(record),a.ref_selected,a.qry_selected,a.aligned_base,a.alignment_length});
+        pairwise_detail::Cigar_t().swap(a.cigar);
+    }
+    pairwise_detail::AnchorVec().swap(anchors);
     std::stable_sort(result.records.begin(),result.records.end(),[](const auto& a,const auto& b){const auto& x=a.record;const auto& y=b.record;return std::tie(x.query_id,x.query_begin,x.reference_id,x.reference_begin,x.strand,x.query_end,x.reference_end)<std::tie(y.query_id,y.query_begin,y.reference_id,y.reference_begin,y.strand,y.query_end,y.reference_end);});
+    std::uint64_t output_cigar_bytes=0;
+    for(const auto& item:result.records)output_cigar_bytes+=item.record.cigar.capacity()*sizeof(CigarOp);
+    observe("core-output-converted",0,result.records.capacity()*sizeof(PairwiseAlignment),output_cigar_bytes);
+    result.statistics.output_conversion_seconds=Elapsed(start);
     KernelProgress(o,"conflict-resolution",result.records.size(),result.records.size());
     return result;
 }
 
+PairwiseCoreResult AlignPairwiseCore(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::span<const Seed> seeds,const PairwiseCoreOptions& o) {
+    std::uint64_t candidate_count{};
+    return AlignPairwiseCoreImpl(references,queries,std::vector<Seed>(seeds.begin(),seeds.end()),o,false,candidate_count);
+}
+
 AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,const std::vector<SequenceRecord>& queries,const AlignmentOptions& options,std::vector<Seed> seeds,RunStatistics stats) {
     if(options.break_length!=200 || options.max_dp_cells!=4000000 || options.match_score!=2 || options.mismatch_penalty!=4 || options.gap_open_penalty!=4 || options.gap_extend_penalty!=2)throw AlignmentError("legacy extension/scoring overrides are not applicable to the pairwise core");
-    PairwiseCoreOptions o{options.max_gap,options.diag_diff,options.diag_factor,options.min_cluster,options.worker_threads,options.interruption_callback,options.progress_callback};
-    auto result=AlignPairwiseCore(refs,queries,seeds,o);
+    PairwiseCoreOptions o{options.max_gap,options.diag_diff,options.diag_factor,options.min_cluster,options.worker_threads,options.interruption_callback,options.progress_callback,options.resident_bytes_callback};
+    std::uint64_t candidate_count{};
+    const auto seed_count=seeds.size();
+    auto result=AlignPairwiseCoreImpl(refs,queries,std::move(seeds),o,options.selection==AlignmentSelection::ReciprocalOneToOne,candidate_count);
     AlignmentResult output;
     output.statistics=std::move(stats);auto& s=output.statistics;
+    s.pairwise=result.statistics;
+    s.memory_observations.insert(s.memory_observations.end(),
+        std::make_move_iterator(result.memory_observations.begin()),std::make_move_iterator(result.memory_observations.end()));
     s.reference_contigs=refs.size();s.query_contigs=queries.size();
     s.reference_bases=0;s.query_bases=0;s.reference_ambiguous_bases=0;s.query_ambiguous_bases=0;
     for(const auto& r:refs){if(r.size()>UINT64_MAX-s.reference_bases)throw AlignmentError("reference statistics overflow");s.reference_bases+=r.size();s.reference_ambiguous_bases+=static_cast<Length>(std::count(r.bases.begin(),r.bases.end(),'N'));}
     for(const auto& q:queries){if(q.size()>UINT64_MAX-s.query_bases)throw AlignmentError("query statistics overflow");s.query_bases+=q.size();s.query_ambiguous_bases+=static_cast<Length>(std::count(q.bases.begin(),q.bases.end(),'N'));}
-    s.selected_seed_count=seeds.size();s.chain_count=result.clusters;
-    s.candidate_alignment_count=result.records.size();
+    s.selected_seed_count=seed_count;s.chain_count=result.clusters;
+    s.candidate_alignment_count=candidate_count;
     s.chaining_route="pairwise-cluster-best-chain+component-link+dual-dp-v1";
     s.chaining_requested_threads=options.worker_threads;s.chaining_worker_threads=result.workers;s.extension_worker_threads=result.workers;
     s.chain_and_extension_seconds=result.clustering_seconds+result.extension_seconds;

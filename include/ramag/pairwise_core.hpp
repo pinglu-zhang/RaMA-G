@@ -13,6 +13,7 @@ struct PairwiseCoreOptions {
     std::uint32_t threads{1};
     std::function<void(std::string_view)> interruption_callback;
     std::function<void(std::string_view,std::uint64_t,std::uint64_t)> progress_callback;
+    std::function<std::uint64_t()> resident_bytes_callback;
 };
 struct PairwiseAlignment {
     AlignmentRecord record;
@@ -29,6 +30,8 @@ struct PairwiseCoreResult {
     double clustering_seconds{};
     double extension_seconds{};
     double selection_seconds{};
+    std::vector<MemoryObservation> memory_observations;
+    PairwiseStatistics statistics;
 };
 // Graph-free, file-free, Sufkit-free entry. Inputs live until this call returns;
 // returned records own their memory. Hooks may be called from worker threads.
