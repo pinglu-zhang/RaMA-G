@@ -79,7 +79,7 @@ struct AlignmentRecord {
 };
 
 // Counts and timings that are intrinsic to the alignment core.  CLI/writer
-// layers may add their own provenance and output statistics to the manifest.
+// layers may add their own provenance and output statistics to the run log.
 // Stage samples, not simultaneous heap peaks. Capacities describe named
 // containers only; RSS includes the process and allocator. RSS=0 is unavailable.
 struct MemoryObservation {
@@ -105,6 +105,32 @@ struct PairwiseStatistics {
     std::uint64_t link_closure_failures{};
     double seed_grouping_seconds{};
     double output_conversion_seconds{};
+    bool recovery_enabled{};
+    std::uint64_t recovery_candidates_checked{};
+    std::uint64_t recovery_proposed_fragments{};
+    std::uint64_t recovery_requeued_fragments{};
+    std::uint64_t recovery_accepted_fragments{};
+    std::uint64_t recovery_reference_bases{};
+    std::uint64_t recovery_query_bases{};
+    double recovery_seconds{};
+    std::string gap_fill_strategy{"off"};
+    std::uint64_t gap_fill_adjacent_pairs{};
+    std::uint64_t gap_fill_geometry_rejected{};
+    std::uint64_t gap_fill_occupied_rejected{};
+    std::uint64_t gap_fill_flank_rejected{};
+    std::uint64_t gap_fill_n_rejected{};
+    std::uint64_t gap_fill_candidates{};
+    std::uint64_t gap_fill_exact{};
+    std::uint64_t gap_fill_ksw_calls{};
+    std::uint64_t gap_fill_quality_rejected{};
+    std::uint64_t gap_fill_nonexact_rejected{};
+    std::uint64_t gap_fill_conflict_rejected{};
+    std::uint64_t gap_fill_accepted{};
+    std::uint64_t gap_fill_reference_bases{};
+    std::uint64_t gap_fill_query_bases{};
+    std::uint64_t gap_fill_paired_columns{};
+    double gap_fill_ksw_seconds{};
+    double gap_fill_seconds{};
 };
 
 struct RunStatistics {

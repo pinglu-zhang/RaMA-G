@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import hashlib
 import json
+import itertools
 import os
 import re
 import sys
@@ -36,42 +36,6 @@ S_LINE_RE = re.compile(rb"^([ \t]*s[ \t]+)([^ \t\r\n]+)(.*)$", re.DOTALL)
 
 class CanonicalizationError(RuntimeError):
     """A validation failure that must stop benchmark evaluation."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _audit_canonical_output(path: Path) -> tuple[Any, Any, int]:
-    """Independently re-read an output candidate before it is published."""
-
-    non_s = hashlib.sha256()
-    payload = hashlib.sha256()
-    s_rows = 0
-    with path.open("rb") as handle:
-        for line_number, line in enumerate(handle, 1):
-            match = S_LINE_RE.match(line)
-            if match is None:
-                non_s.update(line)
-                continue
-            _prefix, encoded_source, suffix = match.groups()
-            try:
-                source = encoded_source.decode("ascii")
-            except UnicodeDecodeError as exc:
-                raise CanonicalizationError(
-                    f"non-ASCII source in output audit on line {line_number}"
-                ) from exc
-            if source not in CANONICAL_SET:
-                raise CanonicalizationError(
-                    f"non-canonical source in output audit on line {line_number}: {source}"
-                )
-            payload.update(suffix)
-            s_rows += 1
-    return non_s, payload, s_rows
 
 
 @contextmanager
@@ -109,8 +73,6 @@ def canonicalize(input_path: Path, output_path: Path) -> dict[str, object]:
     line_count = 0
     block_count = 0
     in_block = False
-    non_s_before = hashlib.sha256()
-    payload_before = hashlib.sha256()
 
     try:
         with _open_input(input_path) as source, temporary.open("xb") as destination:
@@ -119,7 +81,6 @@ def canonicalize(input_path: Path, output_path: Path) -> dict[str, object]:
                 match = S_LINE_RE.match(line)
                 if match is None:
                     destination.write(line)
-                    non_s_before.update(line)
                     stripped = line.strip()
                     if stripped == b"" or stripped == b"a" or stripped.startswith(b"a "):
                         block_sources.clear()
@@ -158,21 +119,25 @@ def canonicalize(input_path: Path, output_path: Path) -> dict[str, object]:
                 s_rows += 1
 
                 # The suffix contains start/size/strand/srcSize/text and its
-                # original whitespace/newline.  Hashing it on both sides makes
-                # the promised non-name invariance explicit in the audit JSON.
-                payload_before.update(suffix)
+                # original whitespace/newline; direct paired re-reading verifies it.
                 destination.write(prefix)
                 destination.write(canonical.encode("ascii"))
                 destination.write(suffix)
 
-        non_s_after, payload_after, audited_s_rows = _audit_canonical_output(temporary)
-        if non_s_before.digest() != non_s_after.digest():
-            raise CanonicalizationError("non-s lines changed during canonicalization")
-        if payload_before.digest() != payload_after.digest():
-            raise CanonicalizationError("s-line payload changed during canonicalization")
-        if audited_s_rows != s_rows:
-            raise CanonicalizationError("s-line count changed during canonicalization")
-        os.replace(temporary, output_path)
+        with _open_input(input_path) as before, temporary.open("rb") as after:
+            for a,b in itertools.zip_longest(before,after):
+                if a is None or b is None:raise CanonicalizationError("line count changed")
+                ma=S_LINE_RE.match(a);mb=S_LINE_RE.match(b)
+                if ma is None:
+                    if a!=b:raise CanonicalizationError("non-s line changed")
+                elif mb is None or ma.group(1)!=mb.group(1) or ma.group(3)!=mb.group(3):
+                    raise CanonicalizationError("s-line payload changed")
+                else:
+                    original=ma.group(2).decode("ascii")
+                    expected=ALIASES.get(original,original).encode("ascii")
+                    if mb.group(2)!=expected:raise CanonicalizationError("canonical source mismatch")
+        os.link(temporary, output_path)
+        temporary.unlink()
     except BaseException:
         try:
             temporary.unlink()
@@ -180,16 +145,12 @@ def canonicalize(input_path: Path, output_path: Path) -> dict[str, object]:
             pass
         raise
 
-    input_sha = _sha256(input_path)
-    output_sha = _sha256(output_path)
     return {
         "schema": "ramag.maf-source-canonicalization.v1",
         "input": str(input_path.resolve()),
         "output": str(output_path.resolve()),
         "input_bytes": input_path.stat().st_size,
         "output_bytes": output_path.stat().st_size,
-        "input_sha256": input_sha,
-        "output_sha256": output_sha,
         "canonical_whitelist": list(CANONICAL_SOURCES),
         "alias_map": dict(sorted(ALIASES.items())),
         "replacement_counts": {
@@ -201,12 +162,8 @@ def canonicalize(input_path: Path, output_path: Path) -> dict[str, object]:
         "s_rows": s_rows,
         "canonical_sources_seen": sorted(seen_sources),
         "rows_by_source": dict(sorted(rows_by_source.items())),
-        "non_s_lines_sha256_before": non_s_before.hexdigest(),
-        "non_s_lines_sha256_after": non_s_after.hexdigest(),
-        "non_s_lines_unchanged": non_s_before.digest() == non_s_after.digest(),
-        "s_line_payload_sha256_before": payload_before.hexdigest(),
-        "s_line_payload_sha256_after": payload_after.hexdigest(),
-        "s_line_payload_unchanged": payload_before.digest() == payload_after.digest(),
+        "non_s_lines_unchanged": True,
+        "s_line_payload_unchanged": True,
         "collision_count": 0,
         "status": "success",
     }

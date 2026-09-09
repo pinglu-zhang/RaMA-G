@@ -81,10 +81,8 @@ struct AlignmentResult {
     RunStatistics statistics;
 };
 
-// Sole record-resolution authority.  All mode removes identical records and
-// selects one primary per query without discarding other records.  Reciprocal
-// one-to-one mode additionally retains only records that are the deterministic
-// best-supported hit for at least one reference and one query interval segment.
+// Apply the current pairwise two-sided DP selection to extended-CIGAR records.
+// All mode retains valid records; first retained record per query is primary.
 void ResolveAlignmentRecords(
     std::vector<AlignmentRecord>& alignments,
     AlignmentSelection selection = AlignmentSelection::All);
@@ -106,10 +104,7 @@ void ResolveAlignmentRecords(
     std::vector<Seed> seeds,
     const std::vector<SequenceRecord>& queries);
 
-// Deterministic baseline genome-to-genome alignment.  It partitions seeds by
-// contig pair/strand, performs bounded monotone chaining, aligns intervening
-// gaps with exact/ungapped fast paths or scalar affine DP, and marks one stable
-// primary record per query contig.
+// High-level alignment using the same pairwise + KSW2 core as the CLI.
 [[nodiscard]] AlignmentResult AlignGenomes(
     const std::vector<SequenceRecord>& references,
     const std::vector<SequenceRecord>& queries,
@@ -133,26 +128,6 @@ void ResolveAlignmentRecords(
 [[nodiscard]] Length CigarMatchLength(std::span<const CigarOp> cigar);
 [[nodiscard]] Length CigarEditDistance(std::span<const CigarOp> cigar);
 
-// Deliberately narrow test access to the production sparse chainer and the
-// retained quadratic oracle.  Production alignment always uses the sparse
-// route; callers cannot select the oracle as a fallback.
-namespace testing {
 
-struct ChainingTestResult {
-    std::vector<std::vector<Seed>> chains;
-    RunStatistics statistics;
-};
-
-[[nodiscard]] ChainingTestResult BuildSparseChainsForTesting(
-    std::span<const Seed> seeds,
-    std::span<const std::pair<SequenceId, Length>> query_lengths,
-    const AlignmentOptions& options = {});
-
-void VerifySparseChainingAgainstQuadraticOracle(
-    std::span<const Seed> seeds,
-    std::span<const std::pair<SequenceId, Length>> query_lengths,
-    const AlignmentOptions& options = {});
-
-}  // namespace testing
 
 }  // namespace ramag

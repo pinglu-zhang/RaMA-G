@@ -465,6 +465,10 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
       have_reference = true;
     } else if (option == "--reference-index") {
       parsed.run_spec.reference_index_path = RequireValue(argc, argv, index, option);
+    } else if (option == "--save") {
+      if (!parsed.run_spec.save_index_path.empty()) throw CliError("--save may appear only once");
+      parsed.run_spec.save_index_path = RequireValue(argc, argv, index, option);
+      if (parsed.run_spec.save_index_path.empty()) throw CliError("--save requires an index file path");
     } else if (option == "--query") {
       parsed.run_spec.query_path = RequireValue(argc, argv, index, option);
       have_query = true;
@@ -527,11 +531,30 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
 }
 
 void ValidateRunSpec(const RunSpec& spec) {
-#if RAMAG_USE_PAIRWISE_CORE
+  if (!spec.save_index_path.empty()) {
+    if (!spec.reference_index_path.empty()) throw CliError("--save and --reference-index are mutually exclusive");
+    ValidateOutputParent(spec.save_index_path);
+    std::vector<std::filesystem::path> protected_paths{spec.reference_path, spec.query_path};
+    for (const auto* suffix : {".sam", ".paf", ".delta", ".maf", ".chain"}) {
+      protected_paths.emplace_back(spec.output_prefix.string() + suffix);
+    }
+    for (const auto& output : spec.outputs) protected_paths.push_back(output.path);
+    for (const auto* suffix : {""}) {
+      const std::filesystem::path target(spec.save_index_path.string() + suffix);
+      if (std::filesystem::symlink_status(target).type() != std::filesystem::file_type::not_found) {
+        throw CliError("refusing to overwrite index artifact: " + target.string());
+      }
+      const auto normalized = std::filesystem::weakly_canonical(target);
+      for (const auto& path : protected_paths) {
+        if (normalized == std::filesystem::weakly_canonical(path)) {
+          throw CliError("saved index path conflicts with input or alignment output: " + target.string());
+        }
+      }
+    }
+  }
   if (spec.alignment.break_length != 200 || spec.alignment.max_dp_cells != 4000000) {
     throw CliError("pairwise core: legacy --break-length/--max-dp-cells overrides are not applicable");
   }
-#endif
   ValidateInput(spec.reference_path, "reference");
   ValidateInput(spec.query_path, "query");
   if (!spec.reference_index_path.empty()) ValidateInput(spec.reference_index_path, "reference index");
@@ -564,9 +587,9 @@ void ValidateRunSpec(const RunSpec& spec) {
   }
 }
 
-void ValidateIndexSpec(const IndexSpec& spec) {
+void ValidateIndexSpec(const IndexSpec& spec, bool require_suffix) {
   ValidateInput(spec.reference_path, "reference");
-  if (spec.output_path.empty() || spec.output_path.extension() != ".sufidx") {
+  if (spec.output_path.empty() || (require_suffix && spec.output_path.extension() != ".sufidx")) {
     throw CliError("index --output must end in .sufidx");
   }
   ValidateOutputParent(spec.output_path);
@@ -589,6 +612,7 @@ Usage:
 Alignment I/O:
   --reference PATH          Reference FASTA or gzip FASTA
   --reference-index PATH    Reusable index created by 'ramag index'
+  --save PATH               Save the newly built index, then align; no overwrite
   --query PATH              Query FASTA or gzip FASTA
   --output PATH             Repeatable; suffix selects sam|paf|delta|maf|chain
   --output-prefix PATH      Legacy output prefix
@@ -605,17 +629,18 @@ Core options:
   --smem-min-occurrences N  Minimum SMEM reference occurrences (default: 1)
   --print-effective-config  Validate, print effective configuration, and exit
 
-Auditable baseline tuning:
+Pairwise + KSW2 tuning:
   --max-gap N               Maximum seed-chain gap (default: 90)
   --diag-diff N             Diagonal tolerance (default: 5)
   --diag-factor X           Relative diagonal tolerance (default: 0.12)
   --min-cluster N           Minimum cluster span (default: 65)
-  --break-length N          Chain split threshold (default: 200)
-  --max-dp-cells N          Hard bound for scalar DP (default: 4000000)
+  --break-length N          Compatibility only: accepts the default 200
+  --max-dp-cells N          Compatibility only: accepts the default 4000000
 
 Signals on POSIX systems:
   SIGUSR1 prints a progress snapshot. SIGINT/SIGTERM request safe interruption;
-  interrupted runs publish no final output or completion marker and are not resumable.
+  interrupted alignments publish no successful alignment marker. Independently
+  completed saved indexes are retained. There is no alignment resume interface.
 )";
 }
 
@@ -637,17 +662,18 @@ std::string VersionText() {
 std::string EffectiveConfigText(const RunSpec& spec) {
   const auto openmp = CurrentOpenMpRuntimeInfo();
   std::ostringstream output;
-#if RAMAG_USE_PAIRWISE_CORE
   output << "alignment_core=pairwise\n"
          << "pairwise_source_commit=7d08359e0df7f7e6ffcfe67217c3399761cb2129\n"
          << "extension_scoring=scaled-HOXD70;gap-open=40;gap-extend=3\n"
          << "break_length_applicability=fixed-pairwise-200\n"
          << "max_dp_cells_applicability=legacy-only\n"
          << "selection_contract=pairwise-reference-query-dp-intersection\n";
-#endif
   output << "command=align\n"
          << "reference=" << AbsoluteForDisplay(spec.reference_path) << '\n'
          << "reference_index=" << AbsoluteForDisplay(spec.reference_index_path) << '\n'
+         << "save=" << AbsoluteForDisplay(spec.save_index_path) << '\n'
+         << "index_persistence=" << (spec.save_index_path.empty() ? "not-requested" : "requested") << '\n'
+         << "lcp_encoding_policy=" << (spec.reference_index_path.empty() ? RAMAG_INTERNAL_LCP_ENCODING : "from-index-file") << '\n'
          << "index_action="
          << (spec.reference_index_path.empty() ? "built" : "loaded") << '\n'
          << "query=" << AbsoluteForDisplay(spec.query_path) << '\n'

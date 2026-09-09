@@ -3,6 +3,7 @@
 #include <span>
 
 namespace ramag {
+enum class GapFillMode { Off, ExactGap, Ksw2Gap };
 // Immutable invocation configuration. Scoring is frozen pairwise HOXD70/10,
 // open=40, extend=3; it never reads PAIRWISE_* environment variables.
 struct PairwiseCoreOptions {
@@ -14,6 +15,12 @@ struct PairwiseCoreOptions {
     std::function<void(std::string_view)> interruption_callback;
     std::function<void(std::string_view,std::uint64_t,std::uint64_t)> progress_callback;
     std::function<std::uint64_t()> resident_bytes_callback;
+    // Experimental, sequence-aware post-selection recovery. Default off.
+    // Returns original candidates plus recovered fragments carrying both flags.
+    bool recover_uncovered_fragments{false};
+    GapFillMode gap_fill{GapFillMode::Off};
+    // Minimum inward exact support at each original flank (CLI: min_match).
+    Length gap_fill_min_match{20};
 };
 struct PairwiseAlignment {
     AlignmentRecord record;
@@ -22,6 +29,8 @@ struct PairwiseAlignment {
     // Frozen pairwise selection accounting, not a calibrated identity estimate.
     Length selection_matching_columns{};
     Length selection_alignment_columns{};
+    bool recovered_fragment{};
+    bool gap_filled_fragment{};
 };
 struct PairwiseCoreResult {
     std::vector<PairwiseAlignment> records;

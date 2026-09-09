@@ -1,11 +1,14 @@
 #include "ramag/reference_index.hpp"
 
-#include "ramag/sha256.hpp"
+#include "ramag/logging.hpp"
 #include "ramag/sufkit_adapter.hpp"
 #include "ramag/writers.hpp"
 #include "ramag/runtime.hpp"
 
 #include <algorithm>
+#include <memory>
+#include <optional>
+#include <cstdlib>
 #include <chrono>
 #include <exception>
 #include <fstream>
@@ -25,6 +28,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+void IndexFailureProbe(std::string_view stage) {
+  const char* requested = std::getenv("RAMAG_TEST_FAIL_INDEX_STAGE");
+  if (requested && stage == requested) throw WriterError("injected index failure: " + std::string(stage));
+}
+
 std::string Nonce() {
   std::random_device device;
   std::mt19937_64 generator(device());
@@ -34,94 +42,6 @@ std::string Nonce() {
 #endif
   output << std::hex << generator();
   return output.str();
-}
-
-std::string UtcTimestamp() {
-  const auto now = std::chrono::system_clock::now();
-  const auto time = std::chrono::system_clock::to_time_t(now);
-  std::tm value{};
-#if defined(_WIN32)
-  gmtime_s(&value, &time);
-#else
-  gmtime_r(&time, &value);
-#endif
-  std::ostringstream output;
-  output << std::put_time(&value, "%Y-%m-%dT%H:%M:%SZ");
-  return output.str();
-}
-
-std::string Escape(std::string_view text) {
-  std::ostringstream output;
-  for (const unsigned char value : text) {
-    switch (value) {
-      case '\\': output << "\\\\"; break;
-      case '"': output << "\\\""; break;
-      case '\n': output << "\\n"; break;
-      case '\r': output << "\\r"; break;
-      case '\t': output << "\\t"; break;
-      default:
-        if (value < 0x20U) {
-          output << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                 << static_cast<unsigned int>(value) << std::dec;
-        } else {
-          output << static_cast<char>(value);
-        }
-    }
-  }
-  return output.str();
-}
-
-void WriteText(const std::filesystem::path& path, std::string_view content) {
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  if (!output) throw WriterError("cannot create index companion: " + path.string());
-  output << content;
-  output.close();
-  if (!output) throw WriterError("cannot finish index companion: " + path.string());
-}
-
-std::string ReadText(const std::filesystem::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) throw DependencyError("missing reference index companion: " + path.string());
-  std::ostringstream output;
-  output << input.rdbuf();
-  if (input.bad()) throw DependencyError("cannot read reference index companion: " + path.string());
-  return output.str();
-}
-
-void RequireContains(std::string_view content, std::string_view expected,
-                     const std::filesystem::path& path) {
-  if (content.find(expected) == std::string_view::npos) {
-    throw DependencyError("reference index companion does not contain required identity '" +
-                          std::string(expected) + "': " + path.string());
-  }
-}
-
-std::string MarkerValue(std::string_view content, std::string_view key,
-                        const std::filesystem::path& path) {
-  const std::string prefix = std::string(key) + "=";
-  std::size_t begin = 0;
-  std::string value;
-  bool found = false;
-  while (begin <= content.size()) {
-    const auto end = content.find('\n', begin);
-    const auto line = content.substr(
-        begin, end == std::string_view::npos ? content.size() - begin : end - begin);
-    if (line.starts_with(prefix)) {
-      if (found) {
-        throw DependencyError("duplicate reference index marker key '" +
-                              std::string(key) + "': " + path.string());
-      }
-      value = std::string(line.substr(prefix.size()));
-      found = true;
-    }
-    if (end == std::string_view::npos) break;
-    begin = end + 1;
-  }
-  if (!found || value.empty()) {
-    throw DependencyError("missing reference index marker key '" +
-                          std::string(key) + "': " + path.string());
-  }
-  return value;
 }
 
 void PublishNoReplace(const std::filesystem::path& temporary,
@@ -142,83 +62,19 @@ std::filesystem::path Temporary(const std::filesystem::path& target,
 }  // namespace
 
 ReferenceIndexPaths MakeReferenceIndexPaths(const std::filesystem::path& index) {
-  return {index, std::filesystem::path(index.string() + ".manifest.json"),
-          std::filesystem::path(index.string() + ".complete")};
+  return {index};
 }
 
-std::string ValidateReferenceIndexBundle(const std::filesystem::path& index,
-                                  const FastaData& reference) {
-  const auto paths = MakeReferenceIndexPaths(index);
-  const auto manifest = ReadText(paths.manifest);
-  const auto complete = ReadText(paths.complete);
-  const auto digest = NormalizedReferenceSha256(reference.sequences);
-  const auto creator = MarkerValue(complete, "sufkit_commit", paths.complete);
-  // Format 1.4 / Fast full-SA compatibility is tested in both directions.
-  constexpr std::string_view previous =
-      "bdb67c6de5daddd8a005640de73d96549d2575f4";
-  constexpr std::string_view previous_parallel =
-      "50e2e5b82ec4dd451fd68d0f2cfcd29566c10010";
-  if (creator != kRequiredSufkitCommit && creator != previous &&
-      creator != previous_parallel) {
-    throw DependencyError("reference index was created by an incompatible Sufkit commit");
-  }
-  if (MarkerValue(complete, "schema_version", paths.complete) != "1" ||
-      MarkerValue(complete, "normalized_reference_sha256", paths.complete) !=
-          digest ||
-      MarkerValue(complete, "manifest_sha256", paths.complete) !=
-          Sha256Hex(manifest)) {
-    throw DependencyError(
-        "reference index complete marker does not match its manifest or reference");
-  }
-  RequireContains(manifest, "\"schema_version\": 1", paths.manifest);
-  RequireContains(manifest, "\"status\": \"success\"", paths.manifest);
-  RequireContains(manifest,
-                  "\"index_kind\": \"standalone_suffix_array\"",
-                  paths.manifest);
-  RequireContains(manifest, "\"resource_profile\": \"fast\"",
-                  paths.manifest);
-  RequireContains(manifest, "\"sampling_rate\": 1", paths.manifest);
-  RequireContains(manifest, "\"acceleration\": \"suffix-link\"",
-                  paths.manifest);
-  RequireContains(manifest, "\"sufkit_commit\": \"" +
-                    creator + "\"", paths.manifest);
-  RequireContains(manifest, "\"sufkit_version\": \"0.3.0\"", paths.manifest);
-  RequireContains(manifest, "\"normalized_reference_sha256\": \"" + digest + "\"",
-                  paths.manifest);
-  RequireContains(manifest,
-                  "\"reference_contigs\": " +
-                      std::to_string(reference.sequences.size()),
-                  paths.manifest);
-  RequireContains(manifest,
-                  "\"reference_bases\": " +
-                      std::to_string(reference.total_bases),
-                  paths.manifest);
-  RequireContains(manifest,
-                  "\"reference_ambiguous_bases\": " +
-                      std::to_string(reference.ambiguous_bases),
-                  paths.manifest);
-  for (std::size_t ordinal = 0; ordinal < reference.sequences.size(); ++ordinal) {
-    const auto& record = reference.sequences[ordinal];
-    const auto ambiguous = static_cast<std::uint64_t>(
-        std::count(record.bases.begin(), record.bases.end(), 'N'));
-    std::ostringstream catalog_entry;
-    catalog_entry << "{\"ordinal\": " << ordinal << ", \"name\": \""
-                  << Escape(record.name) << "\", \"header\": \""
-                  << Escape(record.header) << "\", \"length\": "
-                  << record.size() << ", \"ambiguous_bases\": "
-                  << ambiguous << "}";
-    RequireContains(manifest, catalog_entry.str(), paths.manifest);
-  }
-  return creator;
-}
-
-ReferenceIndexPaths RunReferenceIndexPipeline(
+static ReferenceIndexPaths RunReferenceIndexPipelineImpl(
     const IndexSpec& spec, std::string invocation,
     const std::filesystem::path& binary_path,
-    const CpuAffinityInfo& launch_affinity) {
-  ValidateIndexSpec(spec);
+    const CpuAffinityInfo& launch_affinity,
+    const FastaData* supplied_reference, const SufkitSeedIndex* supplied_index,
+    ProgressSession* supplied_progress, double supplied_build_seconds,
+    std::map<std::string, double>* timings, RunLogger* logger) {
+  ValidateIndexSpec(spec, supplied_index == nullptr);
   const auto paths = MakeReferenceIndexPaths(spec.output_path);
-  for (const auto& path : {paths.index, paths.manifest, paths.complete}) {
+  for (const auto& path : {paths.index}) {
     std::error_code error;
     if (std::filesystem::exists(path, error)) {
       throw WriterError("refusing to overwrite existing index artifact: " + path.string());
@@ -234,23 +90,22 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
   if (error) throw WriterError("cannot create index work directory: " + error.message());
 
   const auto nonce = Nonce();
-  ProgressSession progress(spec.progress, nonce, spec.threads);
+  std::unique_ptr<ProgressSession> owned_progress;
+  if (!supplied_progress) owned_progress = std::make_unique<ProgressSession>(spec.progress, nonce, spec.threads, logger);
+  auto& progress = supplied_progress ? *supplied_progress : *owned_progress;
   const auto temporary_index = Temporary(paths.index, nonce);
-  const auto temporary_manifest = Temporary(paths.manifest, nonce);
-  const auto temporary_complete = Temporary(paths.complete, nonce);
   std::vector<std::filesystem::path> temporaries{
-      temporary_index, temporary_manifest, temporary_complete};
+      temporary_index};
   std::vector<std::pair<std::filesystem::path, std::filesystem::path>> published;
+  bool bundle_committed = false;
   std::string stage{"configuration"};
   try {
     const auto started = Clock::now();
     stage = "input";
-    progress.Stage(stage);
-    const auto reference_compression =
-        DetectFastaCompression(spec.reference_path);
-    auto reference = ReadFasta(spec.reference_path, 0);
-    const auto digest = NormalizedReferenceSha256(reference.sequences);
-    const auto source_digest = FileSha256(spec.reference_path);
+    if (!supplied_reference) progress.Stage(stage);
+    std::optional<FastaData> owned_reference;
+    if (!supplied_reference) owned_reference.emplace(ReadFasta(spec.reference_path, 0));
+    const auto& reference = supplied_reference ? *supplied_reference : *owned_reference;
     const auto pre_sufkit_affinity = CurrentCpuAffinity();
     ValidateCpuAffinityBudget(pre_sufkit_affinity, spec.threads,
                               "Sufkit index build");
@@ -282,10 +137,11 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
                  << " allowed=" << pre_sufkit_affinity.CpuList();
     const auto build_begin = Clock::now();
     stage = "index-build";
-    progress.Stage(stage, 0, 0, build_detail.str());
-    auto index = SufkitSeedIndex::Build(
-        reference.sequences, index_options);
-    const double build_seconds =
+    if (!supplied_index) progress.Stage(stage, 0, 0, build_detail.str());
+    std::optional<SufkitSeedIndex> owned_index;
+    if (!supplied_index) owned_index.emplace(SufkitSeedIndex::Build(reference.sequences, index_options));
+    const auto& index = supplied_index ? *supplied_index : *owned_index;
+    const double build_seconds = supplied_index ? supplied_build_seconds :
         std::chrono::duration<double>(Clock::now() - build_begin).count();
     const auto stats = index.BuildStatistics();
     if (expect_caps && !stats.backend.starts_with("caps")) {
@@ -297,6 +153,7 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
     progress.Stage(stage);
     const auto save_begin = Clock::now();
     index.Save(temporary_index);
+    IndexFailureProbe("save");
     const double save_seconds =
         std::chrono::duration<double>(Clock::now() - save_begin).count();
     stage = "index-validation";
@@ -304,115 +161,33 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
     const auto validation_begin = Clock::now();
     static_cast<void>(SufkitSeedIndex::Load(
         temporary_index, reference.sequences, index_options));
+    IndexFailureProbe("validation");
     const double validation_seconds =
         std::chrono::duration<double>(Clock::now() - validation_begin).count();
     const auto serialized_bytes = std::filesystem::file_size(temporary_index);
-    const auto source_bytes = std::filesystem::file_size(spec.reference_path);
-    const auto binary_bytes = std::filesystem::file_size(binary_path);
-    const auto binary_digest = FileSha256(binary_path);
-
     stage = "publication";
-    progress.Stage(stage, 0, 3);
+    progress.Stage(stage, 0, 1);
     const auto publication_begin = Clock::now();
     published.emplace_back(temporary_index, paths.index);
     PublishNoReplace(temporary_index, paths.index);
+    IndexFailureProbe("publication");
     const double index_publication_seconds =
         std::chrono::duration<double>(Clock::now() - publication_begin).count();
-    progress.Update(1, 3);
-
-    std::ostringstream manifest;
-    manifest << "{\n"
-             << "  \"schema_version\": 1,\n"
-             << "  \"status\": \"success\",\n"
-             << "  \"created_utc\": \"" << UtcTimestamp() << "\",\n"
-             << "  \"sufkit_commit\": \"" << kRequiredSufkitCommit << "\",\n"
-             << "  \"sufkit_version\": \"" << stats.library_version << "\",\n"
-             << "  \"index_kind\": \"standalone_suffix_array\",\n"
-             << "  \"index_format\": \"" << stats.format_version << "\",\n"
-             << "  \"backend\": \"" << Escape(stats.backend) << "\",\n"
-             << "  \"resource_profile\": \"" << Escape(stats.resource_profile) << "\",\n"
-             << "  \"sampling_rate\": " << stats.sampling_rate << ",\n"
-             << "  \"acceleration\": \"" << Escape(stats.acceleration) << "\",\n"
-             << "  \"lookup_acceleration\": \""
-             << Escape(stats.lookup_acceleration) << "\",\n"
-             << "  \"lcp_encoding\": \"" << Escape(stats.lcp_encoding) << "\",\n"
-             << "  \"reference_path\": \"" << Escape(reference.source.string()) << "\",\n"
-             << "  \"reference_compression\": \""
-             << (reference_compression == FastaCompression::Gzip ? "gzip" : "plain")
-             << "\",\n"
-             << "  \"reference_source_bytes\": " << source_bytes << ",\n"
-             << "  \"reference_source_sha256\": \"" << source_digest << "\",\n"
-             << "  \"normalized_reference_sha256\": \"" << digest << "\",\n"
-             << "  \"reference_fingerprint\": " << stats.reference_fingerprint << ",\n"
-             << "  \"reference_contigs\": " << reference.sequences.size() << ",\n"
-             << "  \"reference_bases\": " << reference.total_bases << ",\n"
-             << "  \"reference_ambiguous_bases\": " << reference.ambiguous_bases << ",\n"
-             << "  \"index_bytes\": " << serialized_bytes << ",\n"
-             << "  \"threads\": " << spec.threads << ",\n"
-             << "  \"requested_threads\": " << spec.threads << ",\n"
-             << "  \"launch_allowed_cpu_count\": "
-             << launch_affinity.logical_cpus.size() << ",\n"
-             << "  \"launch_allowed_cpu_list\": \""
-             << Escape(launch_affinity.CpuList()) << "\",\n"
-             << "  \"launch_allowed_cpu_source\": \""
-             << Escape(launch_affinity.source) << "\",\n"
-             << "  \"pre_sufkit_allowed_cpu_count\": "
-             << pre_sufkit_affinity.logical_cpus.size() << ",\n"
-             << "  \"pre_sufkit_allowed_cpu_list\": \""
-             << Escape(pre_sufkit_affinity.CpuList()) << "\",\n"
-             << "  \"index_backend\": \"" << Escape(stats.backend) << "\",\n"
-             << "  \"build_seconds\": " << build_seconds << ",\n"
-             << "  \"sufkit_build_seconds\": "
-             << stats.sufkit_build_seconds << ",\n"
-             << "  \"suffix_array_seconds\": "
-             << stats.suffix_array_seconds << ",\n"
-             << "  \"isa_seconds\": " << stats.isa_seconds << ",\n"
-             << "  \"caps_construct_seconds\": " << stats.caps_construct_seconds << ",\n"
-             << "  \"caps_output_allocation_seconds\": " << stats.caps_output_allocation_seconds << ",\n"
-             << "  \"text_prepare_seconds\": " << stats.text_prepare_seconds << ",\n"
-             << "  \"lcp_finalize_seconds\": " << stats.lcp_finalize_seconds << ",\n"
-             << "  \"prefix_directory_seconds\": " << stats.prefix_directory_seconds << ",\n"
-             << "  \"lcp_seconds\": " << stats.lcp_seconds << ",\n"
-             << "  \"index_save_seconds\": " << save_seconds << ",\n"
-             << "  \"index_validation_seconds\": "
-             << validation_seconds << ",\n"
-             << "  \"index_publication_seconds\": "
-             << index_publication_seconds << ",\n"
-             << "  \"total_seconds\": "
-             << std::chrono::duration<double>(Clock::now() - started).count() << ",\n"
-             << "  \"ramag_commit\": \"" << RAMAG_GIT_COMMIT << "\",\n"
-             << "  \"binary_path\": \"" << Escape(binary_path.string()) << "\",\n"
-             << "  \"binary_bytes\": " << binary_bytes << ",\n"
-             << "  \"binary_sha256\": \"" << binary_digest << "\",\n"
-             << "  \"invocation\": \"" << Escape(invocation) << "\",\n"
-             << "  \"contigs\": [\n";
-    for (std::size_t ordinal = 0; ordinal < reference.sequences.size(); ++ordinal) {
-      const auto& record = reference.sequences[ordinal];
-      const auto ambiguous = static_cast<std::uint64_t>(
-          std::count(record.bases.begin(), record.bases.end(), 'N'));
-      manifest << "    {\"ordinal\": " << ordinal << ", \"name\": \""
-               << Escape(record.name) << "\", \"header\": \""
-               << Escape(record.header) << "\", \"length\": " << record.size()
-               << ", \"ambiguous_bases\": " << ambiguous << "}"
-               << (ordinal + 1 == reference.sequences.size() ? "\n" : ",\n");
+    progress.Update(1, 1);
+    if (!supplied_progress) progress.Finish(std::to_string(serialized_bytes) + " bytes");
+    if (logger) {
+      logger->Info("index_action=built persisted=true index=" + paths.index.string() + " backend=" + stats.backend + " lcp_encoding=" + stats.lcp_encoding + " index_bytes=" + std::to_string(serialized_bytes));
+      logger->Info("index_build_seconds=" + std::to_string(build_seconds) + " sufkit_build_seconds=" + std::to_string(stats.sufkit_build_seconds) + " index_save_seconds=" + std::to_string(save_seconds) + " index_validation_seconds=" + std::to_string(validation_seconds) + " index_publication_seconds=" + std::to_string(index_publication_seconds) + " total_seconds=" + std::to_string(std::chrono::duration<double>(Clock::now() - started).count()), false);
+      logger->Info("binary=" + binary_path.string() + " invocation=" + invocation, false);
+      logger->Flush();
     }
-    manifest << "  ]\n}\n";
-    const auto manifest_text = manifest.str();
-    WriteText(temporary_manifest, manifest_text);
-    std::ostringstream complete;
-    complete << "schema_version=1\n"
-             << "sufkit_commit=" << kRequiredSufkitCommit << "\n"
-             << "normalized_reference_sha256=" << digest << "\n"
-             << "manifest_sha256=" << Sha256Hex(manifest_text) << "\n";
-    WriteText(temporary_complete, complete.str());
-
-    published.emplace_back(temporary_manifest, paths.manifest);
-    PublishNoReplace(temporary_manifest, paths.manifest);
-    progress.Update(2, 3);
-    published.emplace_back(temporary_complete, paths.complete);
-    PublishNoReplace(temporary_complete, paths.complete);
-    progress.Update(3, 3);
-    progress.Finish(std::to_string(serialized_bytes) + " bytes");
+    CheckInterruption("index-publication");
+    bundle_committed = true;
+    if (timings) {
+      (*timings)["index_save"] = save_seconds;
+      (*timings)["index_validation"] = validation_seconds;
+      (*timings)["index_publication"] = std::chrono::duration<double>(Clock::now() - publication_begin).count();
+    }
     for (const auto& temporary : temporaries) {
       std::error_code ignored;
       std::filesystem::remove(temporary, ignored);
@@ -420,36 +195,13 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
     return paths;
   } catch (...) {
     try {
-      const auto failure = std::current_exception();
-      std::filesystem::create_directories(spec.work_dir / "runs" / nonce);
-      try {
-        std::rethrow_exception(failure);
-      } catch (const InterruptedError& interrupted) {
-        std::ostringstream diagnostic;
-        diagnostic << "{\n  \"schema_version\": 1,\n"
-                   << "  \"status\": \"interrupted\",\n"
-                   << "  \"run_id\": \"" << nonce << "\",\n"
-                   << "  \"observed_utc\": \"" << UtcTimestamp() << "\",\n"
-                   << "  \"signal\": " << interrupted.SignalNumber() << ",\n"
-                   << "  \"exit_code\": " << interrupted.ExitCode() << ",\n"
-                   << "  \"interrupted_stage\": \"" << Escape(stage) << "\",\n"
-                   << "  \"message\": \"" << Escape(interrupted.what()) << "\"\n}\n";
-        WriteText(spec.work_dir / "runs" / nonce / "failure.json",
-                  diagnostic.str());
-      } catch (const std::exception& failure_error) {
-        std::ostringstream diagnostic;
-        diagnostic << "{\n  \"schema_version\": 1,\n"
-                   << "  \"status\": \"failed\",\n"
-                   << "  \"run_id\": \"" << nonce << "\",\n"
-                   << "  \"observed_utc\": \"" << UtcTimestamp() << "\",\n"
-                   << "  \"failed_stage\": \"" << Escape(stage) << "\",\n"
-                   << "  \"message\": \"" << Escape(failure_error.what()) << "\"\n}\n";
-        WriteText(spec.work_dir / "runs" / nonce / "failure.json",
-                  diagnostic.str());
+      if (logger) {
+        try { throw; } catch (const std::exception& failure) {
+          logger->Error("status=failed stage=" + stage + " exit_code=" + std::to_string(FailureExitCode(failure)) + " message=" + failure.what());
+        }
       }
-    } catch (...) {
-    }
-    for (auto it = published.rbegin(); it != published.rend(); ++it) {
+    } catch (...) {}
+    for (auto it = published.rbegin(); !bundle_committed && it != published.rend(); ++it) {
       std::error_code ignored;
       if (std::filesystem::equivalent(it->first, it->second, ignored) && !ignored) {
         std::filesystem::remove(it->second, ignored);
@@ -461,6 +213,23 @@ ReferenceIndexPaths RunReferenceIndexPipeline(
     }
     throw;
   }
+}
+
+ReferenceIndexPaths RunReferenceIndexPipeline(
+    const IndexSpec& spec, std::string invocation,
+    const std::filesystem::path& binary_path,
+    const CpuAffinityInfo& launch_affinity, RunLogger* logger) {
+  return RunReferenceIndexPipelineImpl(spec, std::move(invocation), binary_path,
+      launch_affinity, nullptr, nullptr, nullptr, 0.0, nullptr, logger);
+}
+
+ReferenceIndexPaths SaveReferenceIndex(
+    const IndexSpec& spec, const FastaData& reference,
+    const SufkitSeedIndex& index, std::string invocation,
+    const std::filesystem::path& binary_path, ProgressSession& progress,
+    double build_seconds, std::map<std::string, double>& timings, RunLogger* logger) {
+  return RunReferenceIndexPipelineImpl(spec, std::move(invocation), binary_path,
+      CurrentCpuAffinity(), &reference, &index, &progress, build_seconds, &timings, logger);
 }
 
 }  // namespace ramag

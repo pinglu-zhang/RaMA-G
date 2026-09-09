@@ -42,6 +42,7 @@ struct ProgressOptions {
 struct RunSpec {
   std::filesystem::path reference_path;
   std::filesystem::path reference_index_path;
+  std::filesystem::path save_index_path;
   std::filesystem::path query_path;
   std::filesystem::path output_prefix;
   std::vector<OutputRequest> outputs;
@@ -113,6 +114,6 @@ void ConfigureOpenMpRuntime(const RunSpec& spec);
 void ConfigureIndexRuntime(const IndexSpec& spec,
                            const CpuAffinityInfo& launch_affinity);
 void ValidateRunSpec(const RunSpec& spec);
-void ValidateIndexSpec(const IndexSpec& spec);
+void ValidateIndexSpec(const IndexSpec& spec, bool require_suffix = true);
 
 }  // namespace ramag

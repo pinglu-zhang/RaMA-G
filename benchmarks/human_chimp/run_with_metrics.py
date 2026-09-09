@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
-import hashlib
 import json
 import math
 import os
@@ -24,14 +23,6 @@ class MetricsError(RuntimeError):
 
 CLOCK_CONSISTENCY_TOLERANCE_FRACTION = 0.01
 TIMEOUT_TERMINATION_GRACE_SECONDS = 10.0
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def parse_elapsed(value: str) -> float:
@@ -799,7 +790,6 @@ def run(
         parse_error = str(error)
 
     binary = Path(command[0])
-    binary_sha = sha256_file(binary) if binary.is_file() else None
     timeout_evidence = {
         "enabled": timeout_seconds is not None,
         "clock": "CLOCK_MONOTONIC",
@@ -860,7 +850,6 @@ def run(
         "observed_max_aligner_tree_threads": max_aligner_tree_threads,
         "observed_max_aligner_single_process_threads": max_aligner_single_process_threads,
         "binary_path": str(binary.resolve()) if binary.exists() else command[0],
-        "binary_sha256": binary_sha,
         "gnu_time": parsed_time,
         "gnu_time_parse_error": parse_error,
         "status": status,
@@ -870,14 +859,6 @@ def run(
     (output_dir / "exit-code.txt").write_text(f"{exit_code}\n", encoding="ascii")
     if timed_out:
         write_json(output_dir / "timeout.json", timeout_evidence)
-    marker = (
-        "RUN_TIMED_OUT"
-        if timed_out
-        else "RUN_COMPLETE"
-        if exit_code == 0
-        else "RUN_FAILED"
-    )
-    (output_dir / marker).write_text(metrics["status"] + "\n", encoding="ascii")
     return int(exit_code)
 
 

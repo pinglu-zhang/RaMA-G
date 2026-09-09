@@ -1,26 +1,40 @@
 # Third-party notices
 
-RaMA-G itself is licensed under the MIT License. Vendored source attribution
-and separately maintained dependency licenses are described below.
+RaMA-G is distributed under the MIT License in [LICENSE](LICENSE).
+The root license retains both RaMA-G contributor and Pinglu Zhang copyright.
 
-The production dependency contract pins the following separately maintained
-libraries. Their own licenses and notices continue to apply when fetched or
-linked:
+## Sufkit
 
-- **sufkit**, commit `f8c4c386ee883e45ad0f973efc4c8e1148b0068a`.
-- **SeqPro**, commit `6781cadcf81a0da53d7573444594c1484947017c`.
-- **zlib**, discovered through CMake's `ZLIB::ZLIB` target and linked for
-  in-process streaming gzip/BGZF-compatible FASTA decompression. The zlib
-  license and the system/package distributor's notices apply.
+The separately maintained library https://github.com/malabz/sufkit is fixed to
+`f8c4c386ee883e45ad0f973efc4c8e1148b0068a` and obtained by CMake. Its own license
+applies when fetched/linked. RaMA-G does not directly depend on SeqPro.
 
-MUMmer4 is a read-only compatibility reference, not a linked dependency. minibwa commit
-`f0e117436c28addc359b67123d2353f0d4a1f9e8` is an evidence and potential
-MIT-compatible-code source only. Its optional GPL-2.0 `bwtgen` component is
-explicitly excluded from RaMA-G.
+## KSW2
 
-The opt-in graph-free pairwise core incorporates algorithm code and a
-KSW2 snapshot from RaMAx `7d08359e0df7f7e6ffcfe67217c3399761cb2129`.
-See `third_party/attribution/pairwise-source.json` for source identities and adaptations and
-`third_party/attribution/LICENSE.pairwise` for the original MIT copyright and license. The default legacy scalar
-build does not compile this optional snapshot. KSW2's upstream MIT notice is
-retained separately in `third_party/ksw2/LICENSE`.
+Vendored `third_party/ksw2/ksw2.h` and `ksw2_extz2_sse.c` retain their upstream
+MIT notices; see [KSW2 license](third_party/ksw2/LICENSE).
+
+## kseq and spdlog
+
+`third_party/kseq/kseq.h` retains Attractive Chaos's MIT license in its header.
+spdlog headers, bundled fmt and license are in `third_party/spdlog/`; embedded fmt
+notices are retained. See [spdlog license](third_party/spdlog/LICENSE).
+These exact snapshots were taken from RaMAx revision
+`7d08359e0df7f7e6ffcfe67217c3399761cb2129`: `include/kseq.h` and
+`third_party/spdlog/include/` respectively. No global/system fmt is substituted.
+
+## Pairwise source history
+
+The pairwise core was extracted from RaMAx revision
+`7d08359e0df7f7e6ffcfe67217c3399761cb2129`, copyright 2026 Pinglu Zhang, MIT.
+Sources included the anchor, cluster, connection, alignment and CIGAR modules,
+plus the pairwise rare-aligner path before graph insertion. The extraction uses
+checked 64-bit public coordinates, immutable configuration, in-memory sequence
+views and RaMA-G naming. Signed coordinate subtraction and the final floating
+DP comparison were corrected. Graph construction and multi-species orchestration
+were excluded. Subsequent RaMA-G ownership, recovery and guarded gap-fill changes
+are maintained in this repository's history.
+
+The previous separate attribution directory and file-hash inventory were removed.
+Required notices are consolidated here and in the root license; third-party
+library licenses remain with each library.

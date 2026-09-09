@@ -1,4 +1,5 @@
 #include "ramag/runtime.hpp"
+#include "ramag/logging.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -96,10 +97,12 @@ struct ProgressSession::Impl {
   std::string run_id;
   std::uint32_t threads{};
   bool enabled{};
+  RunLogger* logger{};
   std::mutex mutex;
   std::condition_variable condition;
   std::thread worker;
   bool stopping{};
+  std::exception_ptr failure;
   std::string stage{"starting"};
   std::string detail;
   std::uint64_t completed{};
@@ -107,14 +110,14 @@ struct ProgressSession::Impl {
   Clock::time_point started{Clock::now()};
   Clock::time_point stage_started{started};
 
-  Impl(ProgressOptions value, std::string id, std::uint32_t worker_count)
+  Impl(ProgressOptions value, std::string id, std::uint32_t worker_count, RunLogger* log)
       : options(value), run_id(std::move(id)), threads(worker_count),
-        enabled(ProgressEnabled(options.mode)) {
-    if (enabled) Print("start");
+        enabled(log && ProgressEnabled(options.mode)), logger(log) {
+    Print("start", enabled);
     // The watcher also services SIGUSR1 and reports pending interruption while
     // a third-party routine owns the main thread.  It therefore remains active
     // when periodic progress is disabled.
-    worker = std::thread([this] { Run(); });
+    worker = std::thread([this] { try { Run(); } catch (...) { std::lock_guard lock(mutex); failure = std::current_exception(); } });
   }
 
   ~Impl() {
@@ -150,7 +153,8 @@ struct ProgressSession::Impl {
     }
   }
 
-  void Print(std::string_view event) {
+  void Print(std::string_view event, bool terminal = true) {
+    if (!logger) return;
     std::string stage_copy;
     std::string detail_copy;
     std::uint64_t completed_copy = 0;
@@ -174,28 +178,31 @@ struct ProgressSession::Impl {
     else if (completed_copy != 0) output << " completed=" << completed_copy;
     output << " threads=" << threads << " rss_bytes=" << CurrentRssBytes();
     if (!detail_copy.empty()) output << " detail=" << detail_copy;
-    std::cerr << output.str() << '\n';
+    logger->Info(output.str(), terminal);
   }
 };
 
 ProgressSession::ProgressSession(const ProgressOptions& options,
-                                 std::string run_id, std::uint32_t threads)
-    : implementation_(new Impl(options, std::move(run_id), threads)) {}
+                                 std::string run_id, std::uint32_t threads, RunLogger* logger)
+    : implementation_(new Impl(options, std::move(run_id), threads, logger)) {}
 
 ProgressSession::~ProgressSession() { delete implementation_; }
 
 void ProgressSession::Stage(std::string stage, std::uint64_t completed,
                             std::uint64_t total, std::string detail) {
   if (implementation_ == nullptr) return;
+  bool changed = false;
   {
     std::lock_guard lock(implementation_->mutex);
+    changed = implementation_->stage != stage;
+    if (implementation_->failure) std::rethrow_exception(implementation_->failure);
     implementation_->stage = std::move(stage);
     implementation_->completed = completed;
     implementation_->total = total;
     implementation_->detail = std::move(detail);
-    implementation_->stage_started = Impl::Clock::now();
+    if (changed) implementation_->stage_started = Impl::Clock::now();
   }
-  if (implementation_->enabled) implementation_->Print("stage");
+  if (changed) implementation_->Print("stage", implementation_->enabled);
   CheckInterruption(implementation_->stage);
   const char* paused_stage = std::getenv("RAMAG_TEST_PAUSE_STAGE");
   if (paused_stage != nullptr && implementation_->stage == paused_stage) {
@@ -220,7 +227,7 @@ void ProgressSession::Update(std::uint64_t completed, std::uint64_t total,
 
 void ProgressSession::Finish(std::string detail) {
   Stage("complete", 1, 1, std::move(detail));
-  if (implementation_->enabled) implementation_->Print("finish");
+  implementation_->Print("finish", implementation_->enabled);
 }
 
 }  // namespace ramag

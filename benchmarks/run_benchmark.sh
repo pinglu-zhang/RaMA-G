@@ -16,7 +16,7 @@ if [[ ! -f "$plan_path" ]]; then
   echo "benchmark plan not found: $plan_path" >&2
   exit 2
 fi
-if rg -n 'OWNER_TBD' "$plan_path" >/dev/null; then
+if grep -n 'OWNER_TBD' "$plan_path" >/dev/null; then
   echo "benchmark plan still contains OWNER_TBD fields; refusing to run" >&2
   exit 2
 fi
@@ -68,8 +68,7 @@ run_ramag() {
   local exit_code=$?
   set -e
   printf '%s\n' "$exit_code" > "$run_dir/exit-code.txt"
-  if [[ $exit_code -ne 0 || ! -s "$prefix.delta" || \
-        ! -s "$prefix.manifest.json" || ! -s "$prefix.complete" ]]; then
+  if [[ $exit_code -ne 0 || ! -s "$prefix.delta" ]]; then
     touch "$run_dir.INELIGIBLE"
     return 1
   fi
@@ -77,7 +76,7 @@ run_ramag() {
     "${plan[mummer_show_coords_binary]}" -rcl "$prefix.delta" \
       > "$run_dir/show-coords.txt"
   fi
-  wc -c "$prefix.delta" "$prefix.manifest.json" > "$run_dir/artifact-bytes.txt"
+  wc -c "$prefix.delta" > "$run_dir/artifact-bytes.txt"
   touch "$run_dir.ELIGIBLE"
 }
 

@@ -1,3 +1,5 @@
+#include "ramag/logging.hpp"
+#include <memory>
 #include "ramag/cli.hpp"
 #include "ramag/fasta.hpp"
 #include "ramag/pipeline.hpp"
@@ -84,7 +86,7 @@ std::string Invocation(int argc, const char* const* argv) {
 }
 
 std::filesystem::path RunningBinaryPath(const char* argv_zero) {
-#if defined(__linux__)
+#if defined(__linux__) && defined(__ELF__)
   std::error_code link_error;
   const auto proc_path = std::filesystem::read_symlink("/proc/self/exe", link_error);
   if (!link_error && !proc_path.empty()) {
@@ -100,6 +102,7 @@ std::filesystem::path RunningBinaryPath(const char* argv_zero) {
 
 int main(int argc, char** argv) {
   ramag::InstallSignalHandlers();
+  std::unique_ptr<ramag::RunLogger> logger;
   try {
     const auto parsed = ramag::ParseCommandLine(argc, argv);
     if (parsed.show_help) {
@@ -118,15 +121,19 @@ int main(int argc, char** argv) {
         std::cout << ramag::EffectiveIndexConfigText(parsed.index_spec);
         return 0;
       }
+      logger = std::make_unique<ramag::RunLogger>(parsed.index_spec.work_dir);
+      logger->Info(ramag::VersionText(), false);
+      logger->Info(ramag::EffectiveIndexConfigText(parsed.index_spec), false);
+      logger->Info("invocation=" + Invocation(argc, argv), false);
       const auto paths = ramag::RunReferenceIndexPipeline(
           parsed.index_spec, Invocation(argc, argv), binary_path,
-          launch_affinity);
-      std::cout << "RaMA-G reference index completed: index=" << paths.index
-                << "; marker=" << paths.complete << '\n';
+          launch_affinity, logger.get());
+      logger->Info("status=success exit_code=0 index=" + paths.index.string());
+      logger->Flush();
       return 0;
     }
     ramag::ConfigureOpenMpRuntime(parsed.run_spec);
-#if RAMAG_USE_PAIRWISE_CORE && defined(__linux__)
+#if defined(__linux__)
     // Restore only the executable's pre-libgomp authorized CPU mask. The
     // reusable library never changes its caller's affinity or signal handlers.
     (void)LaunchCpuAffinity();
@@ -141,42 +148,22 @@ int main(int argc, char** argv) {
       std::cout << ramag::EffectiveConfigText(parsed.run_spec);
       return 0;
     }
+    logger = std::make_unique<ramag::RunLogger>(parsed.run_spec.work_dir);
+    logger->Info(ramag::VersionText(), false);
+    logger->Info(ramag::EffectiveConfigText(parsed.run_spec), false);
+    logger->Info("invocation=" + Invocation(argc, argv), false);
     const auto outcome = ramag::RunAlignmentPipeline(
-        parsed.run_spec, Invocation(argc, argv), binary_path);
-    std::cout << "RaMA-G completed: " << outcome.statistics.alignment_count
-              << " alignment(s); marker=" << outcome.paths.complete << '\n';
+        parsed.run_spec, Invocation(argc, argv), binary_path, logger.get());
+    (void)outcome;
+    logger->Flush();
     return 0;
-  } catch (const ramag::InterruptedError& error) {
-    std::cerr << "ramag: interrupted: " << error.what() << '\n';
-    return error.ExitCode();
-  } catch (const ramag::UnsupportedSeedMode& error) {
-    std::cerr << "ramag: unsupported: " << error.what() << '\n';
-    return 4;
-  } catch (const ramag::UnsupportedFastaFormat& error) {
-    std::cerr << "ramag: unsupported: " << error.what() << '\n';
-    return 4;
-  } catch (const ramag::CliError& error) {
-    std::cerr << "ramag: cli/config: " << error.what()
-              << "\nRun 'ramag --help' for usage.\n";
-    return 2;
-  } catch (const ramag::FastaError& error) {
-    std::cerr << "ramag: input: " << error.what() << '\n';
-    return 3;
-  } catch (const ramag::DependencyError& error) {
-    std::cerr << "ramag: dependency/index: " << error.what() << '\n';
-    return 5;
-  } catch (const ramag::WriterError& error) {
-    std::cerr << "ramag: output/validation: " << error.what() << '\n';
-    return 7;
-  } catch (const ramag::AlignmentError& error) {
-    std::cerr << "ramag: compute/resource: " << error.what() << '\n';
-    return 6;
-  } catch (const std::bad_alloc& error) {
-    std::cerr << "ramag: compute/resource: memory allocation failed: "
-              << error.what() << '\n';
-    return 6;
   } catch (const std::exception& error) {
-    std::cerr << "ramag: internal: " << error.what() << '\n';
-    return 8;
+    const int code = ramag::FailureExitCode(error);
+    const std::string message = "status=" + std::string(dynamic_cast<const ramag::InterruptedError*>(&error) ? "interrupted" : "failed") + " exit_code=" + std::to_string(code) + " message=" + error.what();
+    try {
+      if (logger) logger->Error(message);
+      else std::cerr << "ramag: " << message << '\n';
+    } catch (...) { std::cerr << "ramag: " << message << '\n'; }
+    return code;
   }
 }

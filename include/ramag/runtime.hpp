@@ -24,10 +24,12 @@ class InterruptedError : public std::runtime_error {
 void InstallSignalHandlers();
 void CheckInterruption(std::string_view stage);
 
+class RunLogger;
+
 class ProgressSession {
  public:
   ProgressSession(const ProgressOptions& options, std::string run_id,
-                  std::uint32_t threads);
+                  std::uint32_t threads, RunLogger* logger = nullptr);
   ~ProgressSession();
   ProgressSession(const ProgressSession&) = delete;
   ProgressSession& operator=(const ProgressSession&) = delete;

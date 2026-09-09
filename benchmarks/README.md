@@ -13,7 +13,7 @@ throughput run. MUMmer4 commands are supplied explicitly in the plan so the
 harness never guesses a semantically unfair comparison.
 
 Only runs with exit code zero, a non-empty requested artifact, a valid RaMA-G
-manifest and `.complete` marker (where applicable), and successful external
+process exit code, requested output files and run log, and successful external
 format validation are eligible for aggregation. Cold-cache manipulation is not
 performed automatically because it usually requires privileged, system-wide
 state changes; cold and warm runs must instead be scheduled and recorded by the

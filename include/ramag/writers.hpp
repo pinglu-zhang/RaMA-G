@@ -19,8 +19,6 @@ struct OutputPaths {
   std::filesystem::path delta;
   std::filesystem::path maf;
   std::filesystem::path chain;
-  std::filesystem::path manifest;
-  std::filesystem::path complete;
 };
 
 class WriterError : public std::runtime_error {

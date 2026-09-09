@@ -35,9 +35,6 @@ enum class FastaCompression : std::uint8_t { Plain, Gzip };
 [[nodiscard]] FastaCompression DetectFastaCompression(
     const std::filesystem::path& path);
 
-// Require a plain FASTA before handing it to the mmap-only SeqPro adapter.
-void ValidateUncompressedFasta(const std::filesystem::path& path);
-
 // Read a strict plain or gzip FASTA file. IDs are the first header token and
 // must be unique.  ASCII letters other than A/C/G/T are normalized to N; other
 // sequence characters are rejected.  Records with no bases are rejected.

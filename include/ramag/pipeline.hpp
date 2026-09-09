@@ -9,6 +9,8 @@
 
 namespace ramag {
 
+class RunLogger;
+
 struct RunOutcome {
   OutputPaths paths;
   RunStatistics statistics;
@@ -16,6 +18,6 @@ struct RunOutcome {
 
 [[nodiscard]] RunOutcome RunAlignmentPipeline(const RunSpec& spec,
                                               std::string invocation,
-                                              std::filesystem::path binary_path);
+                                              std::filesystem::path binary_path, RunLogger* logger = nullptr);
 
 }  // namespace ramag

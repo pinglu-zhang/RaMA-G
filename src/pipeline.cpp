@@ -1,15 +1,12 @@
 #include "ramag/pipeline.hpp"
-#if RAMAG_USE_PAIRWISE_CORE
 #include "ramag/pairwise_core.hpp"
-#endif
 
 #include "ramag/alignment.hpp"
 #include "ramag/fasta.hpp"
-#include "ramag/manifest.hpp"
 #include "ramag/reference_index.hpp"
 #include "ramag/runtime.hpp"
-#include "ramag/sha256.hpp"
-#include "ramag/seqpro_adapter.hpp"
+#include "ramag/logging.hpp"
+#include <map>
 #include "ramag/sufkit_adapter.hpp"
 
 #include <algorithm>
@@ -53,22 +50,6 @@ std::string MakeNonce() {
   std::ostringstream value;
   value << std::hex << ticks << '-' << random();
   return value.str();
-}
-
-std::string CurrentUtcTimestamp() {
-  const auto now = std::chrono::system_clock::now();
-  const auto time = std::chrono::system_clock::to_time_t(now);
-  std::tm utc{};
-#if defined(_WIN32)
-  gmtime_s(&utc, &time);
-#else
-  gmtime_r(&time, &utc);
-#endif
-  char buffer[32]{};
-  if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
-    return "unknown";
-  }
-  return buffer;
 }
 
 std::string AbsolutePathString(const std::filesystem::path& path) {
@@ -201,8 +182,8 @@ void MaybeInjectInputFailure(std::string_view role) {
   }
 }
 
-struct ParallelSeqProInputs {
-  std::array<SeqProInputResult, 2> results;
+struct ParallelFastaInputs {
+  std::array<FastaData, 2> results;
   std::array<std::exception_ptr, 2> failures;
   std::array<int, 2> worker_ids{-1, -1};
   std::uint32_t requested_workers{1};
@@ -210,9 +191,8 @@ struct ParallelSeqProInputs {
   std::string route{"serial-reference-query-v1"};
 };
 
-ParallelSeqProInputs ReadSeqProInputs(const RunSpec& spec,
-                                      const std::filesystem::path& work_dir) {
-  ParallelSeqProInputs inputs;
+ParallelFastaInputs ReadFastaInputs(const RunSpec& spec) {
+  ParallelFastaInputs inputs;
   inputs.requested_workers = spec.threads > 1 ? 2U : 1U;
 
   const auto read_role = [&](std::size_t role_index) noexcept {
@@ -226,9 +206,7 @@ ParallelSeqProInputs ReadSeqProInputs(const RunSpec& spec,
       const bool is_reference = role_index == 0;
       const std::string_view role = is_reference ? "reference" : "query";
       MaybeInjectInputFailure(role);
-      inputs.results[role_index] = ReadFastaWithSeqPro(
-          is_reference ? spec.reference_path : spec.query_path,
-          SeqProInputOptions{work_dir, std::string(role), 0, false});
+      inputs.results[role_index] = ReadFasta(is_reference ? spec.reference_path : spec.query_path);
     } catch (...) {
       // No exception may cross an OpenMP structured block. Each role owns a
       // distinct result and failure slot; failures are rethrown below in the
@@ -302,6 +280,12 @@ void MaybeInjectPublicationRace(const std::filesystem::path& final_path) {
   }
 }
 
+struct ArtifactReport {
+  std::string format;
+  std::filesystem::path path;
+  std::uintmax_t bytes{};
+};
+
 ArtifactReport Artifact(std::string format,
                         const std::filesystem::path& temporary,
                         const std::filesystem::path& final_path) {
@@ -311,7 +295,7 @@ ArtifactReport Artifact(std::string format,
     throw WriterError("cannot inspect temporary artifact " + temporary.string() +
                       ": " + error.message());
   }
-  return {std::move(format), final_path, bytes, "validated"};
+  return {std::move(format), final_path, bytes};
 }
 
 std::string SeedRoute(SeedMode mode) {
@@ -331,7 +315,7 @@ std::string SeedRoute(SeedMode mode) {
 }
 
 void EnsureTargetsAbsent(const RunSpec& spec, const OutputPaths& paths) {
-  std::vector<std::filesystem::path> targets{paths.manifest, paths.complete};
+  std::vector<std::filesystem::path> targets;
   if (spec.formats.sam) {
     targets.push_back(paths.sam);
   }
@@ -368,117 +352,24 @@ void VerifyPublishedArtifact(const ArtifactReport& artifact) {
   }
 }
 
-void ValidateManifestFile(const std::filesystem::path& path,
-                          std::string_view run_id,
-                          std::string_view expected_content) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    throw WriterError("cannot validate manifest: " + path.string());
-  }
-  const std::string content{std::istreambuf_iterator<char>(input),
-                            std::istreambuf_iterator<char>()};
-  if (input.bad() || content != expected_content ||
-      content.find("\"schema_version\": 1") == std::string::npos ||
-      content.find("\"status\": \"success\"") == std::string::npos ||
-      content.find(std::string(run_id)) == std::string::npos) {
-    throw WriterError("manifest self-validation failed: " + path.string());
-  }
-}
-
-int FailureExitCode(const std::exception& error) noexcept {
-  if (dynamic_cast<const UnsupportedSeedMode*>(&error) != nullptr ||
-      dynamic_cast<const UnsupportedFastaFormat*>(&error) != nullptr) {
-    return 4;
-  }
-  if (const auto* interrupted = dynamic_cast<const InterruptedError*>(&error)) {
-    return interrupted->ExitCode();
-  }
-  if (dynamic_cast<const CliError*>(&error) != nullptr) {
-    return 2;
-  }
-  if (dynamic_cast<const FastaError*>(&error) != nullptr) {
-    return 3;
-  }
-  if (dynamic_cast<const DependencyError*>(&error) != nullptr) {
-    return 5;
-  }
-  if (dynamic_cast<const WriterError*>(&error) != nullptr) {
-    return 7;
-  }
-  if (dynamic_cast<const AlignmentError*>(&error) != nullptr) {
-    return 6;
-  }
-  if (dynamic_cast<const std::bad_alloc*>(&error) != nullptr) {
-    return 6;
-  }
-  return 8;
-}
-
-std::string EscapeFailureJson(std::string_view value) {
-  std::string escaped;
-  for (const char character : value) {
-    if (character == '\\' || character == '\"') {
-      escaped.push_back('\\');
-      escaped.push_back(character);
-    } else if (character == '\n' || character == '\r' || character == '\t') {
-      escaped.push_back(' ');
-    } else if (static_cast<unsigned char>(character) >= 0x20U) {
-      escaped.push_back(character);
-    }
-  }
-  return escaped;
-}
-
-void WriteFailureDiagnostic(const std::filesystem::path& run_directory,
-                            std::string_view run_id,
-                            std::string_view stage,
-                            const std::exception& error) noexcept {
-  try {
-    std::error_code directory_error;
-    std::filesystem::create_directories(run_directory, directory_error);
-    if (directory_error) {
-      return;
-    }
-    std::ofstream output(run_directory / "failure.json",
-                         std::ios::binary | std::ios::trunc);
-    if (!output) {
-      return;
-    }
-    const auto* interrupted = dynamic_cast<const InterruptedError*>(&error);
-    output << "{\n"
-           << "  \"schema_version\": 1,\n"
-           << "  \"status\": \""
-           << (interrupted == nullptr ? "failed" : "interrupted") << "\",\n"
-           << "  \"run_id\": \"" << EscapeFailureJson(run_id) << "\",\n"
-           << "  \"observed_utc\": \""
-           << EscapeFailureJson(CurrentUtcTimestamp()) << "\",\n"
-           << "  \"exit_code\": " << FailureExitCode(error) << ",\n"
-           << "  \"failed_stage\": \"" << EscapeFailureJson(stage) << "\",\n";
-    if (interrupted != nullptr) {
-      output << "  \"signal\": " << interrupted->SignalNumber() << ",\n";
-    }
-    output
-           << "  \"message\": \"" << EscapeFailureJson(error.what()) << "\"\n"
-           << "}\n";
-  } catch (...) {
-  }
-}
-
 }  // namespace
 
 RunOutcome RunAlignmentPipeline(const RunSpec& spec,
                                 std::string invocation,
-                                std::filesystem::path binary_path) {
+                                std::filesystem::path binary_path, RunLogger* logger) {
   ValidateRunSpec(spec);
+  if (!spec.save_index_path.empty() && !SufkitAdapterAvailable()) {
+    throw DependencyError("--save requires the pinned Sufkit production adapter");
+  }
   const auto total_begin = Clock::now();
   const auto paths = MakeOutputPaths(spec);
-  const auto run_id = MakeNonce();
-  const auto started_utc = CurrentUtcTimestamp();
+  const auto run_id = logger ? logger->Id() : MakeNonce();
   const auto run_directory = spec.work_dir / "runs" / run_id;
   std::string stage = "configuration";
+  std::filesystem::path retained_index;
   EnsureDirectory(spec.work_dir, "work directory");
   EnsureDirectory(run_directory, "run diagnostic directory");
-  ProgressSession progress(spec.progress, run_id, spec.threads);
+  ProgressSession progress(spec.progress, run_id, spec.threads, logger);
 
   try {
     progress.Stage("configuration");
@@ -502,78 +393,15 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
         reference_compression == FastaCompression::Gzip ? "gzip" : "plain";
     adapter_provenance["input.query.compression"] =
         query_compression == FastaCompression::Gzip ? "gzip" : "plain";
-    if (SeqProAdapterAvailable() &&
-        reference_compression == FastaCompression::Plain &&
-        query_compression == FastaCompression::Plain) {
-      const auto seqpro_work = run_directory / "seqpro";
-      EnsureDirectory(seqpro_work, "SeqPro input work directory");
-      auto inputs = ReadSeqProInputs(spec, seqpro_work);
-      input_requested_workers = inputs.requested_workers;
-      input_actual_workers = inputs.actual_workers;
-      input_parallel_route = std::move(inputs.route);
-      auto reference_input = std::move(inputs.results[0]);
-      auto query_input = std::move(inputs.results[1]);
-      adapter_provenance["seqpro.reference.fai"] =
-          AbsolutePathString(reference_input.fasta_index_path);
-      adapter_provenance["seqpro.reference.metadata"] =
-          AbsolutePathString(reference_input.metadata_path);
-      adapter_provenance["seqpro.reference.source_fai"] =
-          AbsolutePathString(reference_input.source_fasta_index_path);
-      adapter_provenance["seqpro.reference.source_fai_bytes"] =
-          std::to_string(reference_input.source_fasta_index_size_bytes);
-      adapter_provenance["seqpro.reference.source_fai_sha256"] =
-          reference_input.source_fasta_index_sha256;
-      adapter_provenance["seqpro.reference.source_fai.copy_status"] =
-          reference_input.source_fasta_index_copied ? "copied" : "not-present";
-      adapter_provenance["seqpro.reference.external_fai.adoption_status"] =
-          reference_input.external_fasta_index_adopted ? "adopted"
-                                                       : "not-applicable";
-      adapter_provenance["seqpro.reference.build_action"] =
-          reference_input.build_action;
-      adapter_provenance["seqpro.reference.index_origin"] =
-          reference_input.index_origin;
-      adapter_provenance["seqpro.reference.verification"] =
-          reference_input.verification_status;
-      adapter_provenance["seqpro.query.fai"] =
-          AbsolutePathString(query_input.fasta_index_path);
-      adapter_provenance["seqpro.query.metadata"] =
-          AbsolutePathString(query_input.metadata_path);
-      adapter_provenance["seqpro.query.source_fai"] =
-          AbsolutePathString(query_input.source_fasta_index_path);
-      adapter_provenance["seqpro.query.source_fai_bytes"] =
-          std::to_string(query_input.source_fasta_index_size_bytes);
-      adapter_provenance["seqpro.query.source_fai_sha256"] =
-          query_input.source_fasta_index_sha256;
-      adapter_provenance["seqpro.query.source_fai.copy_status"] =
-          query_input.source_fasta_index_copied ? "copied" : "not-present";
-      adapter_provenance["seqpro.query.external_fai.adoption_status"] =
-          query_input.external_fasta_index_adopted ? "adopted"
-                                                   : "not-applicable";
-      adapter_provenance["seqpro.query.build_action"] =
-          query_input.build_action;
-      adapter_provenance["seqpro.query.index_origin"] =
-          query_input.index_origin;
-      adapter_provenance["seqpro.query.verification"] =
-          query_input.verification_status;
-      reference = std::move(reference_input.fasta);
-      query = std::move(query_input.fasta);
-      if (reference_input.source_fasta_index_copied &&
-          query_input.source_fasta_index_copied) {
-        input_route = "seqpro-external-fai-mmap+caller-buffer-copy";
-      } else if (reference_input.source_fasta_index_copied ||
-                 query_input.source_fasta_index_copied) {
-        input_route = "seqpro-hybrid-fai-mmap+caller-buffer-copy";
-      } else {
-        input_route = "seqpro-indexed-fasta-mmap+caller-buffer-copy";
-      }
-    } else {
-      reference = ReadFasta(spec.reference_path, 0);
-      query = ReadFasta(spec.query_path, 0);
-      input_route = reference_compression == FastaCompression::Gzip ||
-                            query_compression == FastaCompression::Gzip
-                        ? "bundled-strict-zlib-fasta"
-                        : "bundled-strict-fasta-oracle";
-    }
+    auto inputs = ReadFastaInputs(spec);
+    input_requested_workers = inputs.requested_workers;
+    input_actual_workers = inputs.actual_workers;
+    input_parallel_route = std::move(inputs.route);
+    reference = std::move(inputs.results[0]);
+    query = std::move(inputs.results[1]);
+    input_route = "kseq-zlib-strict-fasta";
+    if (logger) logger->Info("input reference_bases=" + std::to_string(reference.total_bases) +
+        " query_bases=" + std::to_string(query.total_bases) + " actual_workers=" + std::to_string(input_actual_workers));
     timings["input"] = SecondsBetween(input_begin, Clock::now());
     progress.Update(static_cast<std::uint64_t>(reference.sequences.size() +
                                                query.sequences.size()),
@@ -590,9 +418,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     std::uint32_t actual_threads = 1;
     AlignmentOptions alignment_options = spec.alignment;
     alignment_options.worker_threads = spec.threads;
-#if RAMAG_USE_PAIRWISE_CORE
     alignment_options.resident_bytes_callback = CurrentResidentBytes;
-#endif
     alignment_options.progress_callback =
         [&](std::string_view phase, std::uint64_t completed,
             std::uint64_t total) {
@@ -616,7 +442,6 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       RunStatistics seed_statistics;
       const auto memory_begin = Clock::now();
       const auto observe_index = [&](std::string phase, std::uint64_t index_bytes) {
-#if RAMAG_USE_PAIRWISE_CORE
         MemoryObservation observation;
         observation.stage = std::move(phase);
         observation.elapsed_seconds = SecondsBetween(memory_begin, Clock::now());
@@ -624,9 +449,6 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
         observation.index_estimated_bytes = index_bytes;
         observation.seed_capacity_bytes = seed_result.seeds.capacity() * sizeof(Seed);
         seed_statistics.memory_observations.push_back(std::move(observation));
-#else
-        (void)phase; (void)index_bytes; (void)memory_begin;
-#endif
       };
       // Seeds and their statistics own all data needed by the alignment core.
       // Release the full SA/ISA/LCP before allocating pairwise workspaces.
@@ -637,50 +459,48 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       progress.Stage(stage, 0, 0,
                      load_persistent_index ? spec.reference_index_path.string()
                                            : "ephemeral");
-      std::string index_creator_commit{kRequiredSufkitCommit};
       SufkitIndexOptions core_index_options{spec.threads};
-#if RAMAG_USE_PAIRWISE_CORE
       core_index_options.mam_worker_cap = spec.threads;
       core_index_options.mam_workspace_limit_bytes = UINT64_MAX;
       core_index_options.boundary_mem_occurrence_limit = UINT64_MAX;
-#endif
       auto index = [&]() {
         if (load_persistent_index) {
-          index_creator_commit =
-              ValidateReferenceIndexBundle(spec.reference_index_path, reference);
           return SufkitSeedIndex::Load(
               spec.reference_index_path, reference.sequences,
               core_index_options);
         }
+        const auto build_affinity = CurrentCpuAffinity();
+        ValidateCpuAffinityBudget(build_affinity, spec.threads, "Sufkit alignment build");
+        adapter_provenance["sufkit.index.pre_build_cpu_list"] = build_affinity.CpuList();
+        adapter_provenance["sufkit.index.pre_build_cpu_count"] = std::to_string(build_affinity.logical_cpus.size());
         return SufkitSeedIndex::Build(
             reference.sequences, core_index_options);
       }();
       const double index_seconds = SecondsBetween(index_begin, Clock::now());
       timings[load_persistent_index ? "index_load" : "index_build"] =
           index_seconds;
+      adapter_provenance["sufkit.index.save_path"] = spec.save_index_path.string();
+      adapter_provenance["sufkit.index.persisted"] = "false";
+      if (!spec.save_index_path.empty()) {
+        stage = "index-save";
+        IndexSpec save_spec{spec.reference_path, spec.save_index_path,
+                            spec.work_dir, spec.threads, spec.progress};
+        const auto saved = SaveReferenceIndex(save_spec, reference, index,
+            invocation, binary_path, progress, index_seconds, timings, logger);
+        retained_index = saved.index;
+        adapter_provenance["sufkit.index.persisted"] = "true";
+      }
       adapter_provenance["sufkit.index.action"] =
           load_persistent_index ? "loaded" : "built";
-      adapter_provenance["sufkit.index.created_with_commit"] =
-          index_creator_commit;
       adapter_provenance["sufkit.index.loaded_with_commit"] =
           std::string(kRequiredSufkitCommit);
       adapter_provenance["sufkit.index.path"] =
           load_persistent_index
               ? AbsolutePathString(spec.reference_index_path)
-              : "ephemeral";
+              : (spec.save_index_path.empty() ? "ephemeral" : AbsolutePathString(spec.save_index_path));
       adapter_provenance["sufkit.index.reference_validation"] =
-          load_persistent_index ? "manifest+complete+metadata+fingerprint"
+          load_persistent_index ? "sufkit-crc+structure+metadata+fingerprint"
                                 : "built-from-current-reference";
-      if (load_persistent_index) {
-        const auto bundle_paths =
-            MakeReferenceIndexPaths(spec.reference_index_path);
-        adapter_provenance["sufkit.index.bundle_manifest_sha256"] =
-            FileSha256(bundle_paths.manifest);
-        adapter_provenance["sufkit.index.bundle_complete_path"] =
-            AbsolutePathString(bundle_paths.complete);
-        adapter_provenance["sufkit.index.normalized_reference_sha256"] =
-            NormalizedReferenceSha256(reference.sequences);
-      }
       stage = "seed-enumeration";
       progress.Stage(stage, 0,
                      static_cast<std::uint64_t>(query.sequences.size()));
@@ -872,27 +692,18 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       seeding_route = seed_result.statistics.actual_route;
       }
       observe_index("index-released", 0);
-#if RAMAG_USE_PAIRWISE_CORE
       result = AlignPairwiseFromSeeds(
-#else
-      result = AlignGenomesFromSeeds(
-#endif
           reference.sequences, query.sequences, alignment_options,
           std::move(seed_result.seeds), std::move(seed_statistics));
     } else {
       stage = "seed-enumeration";
       progress.Stage(stage);
-#if RAMAG_USE_PAIRWISE_CORE
       RunStatistics oracle_statistics;
       auto oracle_seeds = EnumerateSeeds(reference.sequences, query.sequences,
                                         alignment_options, &oracle_statistics);
       result = AlignPairwiseFromSeeds(reference.sequences, query.sequences,
                                    alignment_options, std::move(oracle_seeds),
                                    std::move(oracle_statistics));
-#else
-      result = AlignGenomes(reference.sequences, query.sequences,
-                            alignment_options);
-#endif
       index_route = "bundled-canonical-kmer-oracle-index";
       seeding_route = SeedRoute(spec.alignment.seed_mode);
     }
@@ -917,8 +728,6 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     const auto temporary_delta = TemporarySibling(paths.delta, run_id);
     const auto temporary_maf = TemporarySibling(paths.maf, run_id);
     const auto temporary_chain = TemporarySibling(paths.chain, run_id);
-    const auto temporary_manifest = TemporarySibling(paths.manifest, run_id);
-    const auto temporary_complete = TemporarySibling(paths.complete, run_id);
     TemporaryFiles temporary_files;
     PublishedFiles published_files;
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> publish;
@@ -1032,43 +841,6 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     }
     timings["writers_total"] = SecondsBetween(writers_begin, Clock::now());
 
-    stage = "manifest";
-    progress.Stage(stage);
-    ManifestData manifest;
-    manifest.run_id = run_id;
-    manifest.started_utc = started_utc;
-    manifest.finished_utc = CurrentUtcTimestamp();
-    manifest.run_spec = spec;
-    manifest.reference = &reference;
-    manifest.query = &query;
-    manifest.statistics = result.statistics;
-    manifest.artifacts = artifacts;
-    manifest.stage_wall_seconds = timings;
-    manifest.adapter_provenance = std::move(adapter_provenance);
-    manifest.invocation = std::move(invocation);
-    manifest.binary_path = std::move(binary_path);
-    manifest.input_route = std::move(input_route);
-    manifest.index_route = std::move(index_route);
-    manifest.seeding_route = std::move(seeding_route);
-    manifest.chaining_route = result.statistics.chaining_route;
-#if RAMAG_USE_PAIRWISE_CORE
-    manifest.extension_route = "pairwise-ksw2-certified-global+endpoint-extension";
-#endif
-    manifest.input_parallel_route = std::move(input_parallel_route);
-    manifest.input_requested_workers = input_requested_workers;
-    manifest.input_actual_workers = input_actual_workers;
-    manifest.actual_threads = actual_threads;
-    manifest.stage_wall_seconds["total_before_publish"] =
-        SecondsBetween(total_begin, Clock::now());
-
-    temporary_files.Add(temporary_manifest);
-    const std::string manifest_json = ManifestJson(manifest);
-    WriteFile(temporary_manifest, [&](std::ostream& output) {
-      output << manifest_json;
-    });
-    ValidateManifestFile(temporary_manifest, run_id, manifest_json);
-    publish.emplace_back(temporary_manifest, paths.manifest);
-
     stage = "publication";
     progress.Stage(stage, 0, static_cast<std::uint64_t>(publish.size()));
     std::uint64_t published_count = 0;
@@ -1094,24 +866,129 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
         ValidateChainFile(artifact.path);
       }
     }
-    ValidateManifestFile(paths.manifest, run_id, manifest_json);
-
-    stage = "complete-marker";
-    progress.Stage(stage);
-    temporary_files.Add(temporary_complete);
-    WriteFile(temporary_complete, [&](std::ostream& output) {
-      output << "schema_version=1\n"
-             << "run_id=" << run_id << "\n";
-    });
-    published_files.Add(temporary_complete, paths.complete);
-    PublishNewFile(temporary_complete, paths.complete);
     progress.Finish(std::to_string(result.statistics.alignment_count) +
                     " alignments");
+    if (logger) {
+      logger->Info("statistics.reference_contigs=" + std::to_string(result.statistics.reference_contigs), false);
+      logger->Info("statistics.query_contigs=" + std::to_string(result.statistics.query_contigs), false);
+      logger->Info("statistics.reference_bases=" + std::to_string(result.statistics.reference_bases), false);
+      logger->Info("statistics.query_bases=" + std::to_string(result.statistics.query_bases), false);
+      logger->Info("statistics.reference_ambiguous_bases=" + std::to_string(result.statistics.reference_ambiguous_bases), false);
+      logger->Info("statistics.query_ambiguous_bases=" + std::to_string(result.statistics.query_ambiguous_bases), false);
+      logger->Info("statistics.mem_seed_count=" + std::to_string(result.statistics.mem_seed_count), false);
+      logger->Info("statistics.mam_seed_count=" + std::to_string(result.statistics.mam_seed_count), false);
+      logger->Info("statistics.mum_seed_count=" + std::to_string(result.statistics.mum_seed_count), false);
+      logger->Info("statistics.smem_interval_count=" + std::to_string(result.statistics.smem_interval_count), false);
+      logger->Info("statistics.smem_coordinate_seed_count=" + std::to_string(result.statistics.smem_coordinate_seed_count), false);
+      logger->Info("statistics.selected_seed_count=" + std::to_string(result.statistics.selected_seed_count), false);
+      logger->Info("statistics.merged_seed_count=" + std::to_string(result.statistics.merged_seed_count), false);
+      logger->Info("statistics.chain_count=" + std::to_string(result.statistics.chain_count), false);
+      logger->Info("statistics.candidate_alignment_count=" + std::to_string(result.statistics.candidate_alignment_count), false);
+      logger->Info("statistics.conflict_rejected_alignment_count=" + std::to_string(result.statistics.conflict_rejected_alignment_count), false);
+      logger->Info("statistics.alignment_count=" + std::to_string(result.statistics.alignment_count), false);
+      logger->Info("statistics.exact_gap_count=" + std::to_string(result.statistics.exact_gap_count), false);
+      logger->Info("statistics.ungapped_gap_count=" + std::to_string(result.statistics.ungapped_gap_count), false);
+      logger->Info("statistics.dp_gap_count=" + std::to_string(result.statistics.dp_gap_count), false);
+      logger->Info("statistics.seed_requested_threads=" + std::to_string(result.statistics.seed_requested_threads), false);
+      logger->Info("statistics.seed_scheduled_threads=" + std::to_string(result.statistics.seed_scheduled_threads), false);
+      logger->Info("statistics.seed_worker_threads=" + std::to_string(result.statistics.seed_worker_threads), false);
+      logger->Info("statistics.seed_task_count=" + std::to_string(result.statistics.seed_task_count), false);
+      logger->Info("statistics.seed_tasks_completed=" + std::to_string(result.statistics.seed_tasks_completed), false);
+      logger->Info("statistics.seed_parallel_route=" + result.statistics.seed_parallel_route, false);
+      logger->Info("statistics.seed_mam_worker_cap=" + std::to_string(result.statistics.seed_mam_worker_cap), false);
+      logger->Info("statistics.seed_mam_tile_bases=" + std::to_string(result.statistics.seed_mam_tile_bases), false);
+      logger->Info("statistics.seed_oriented_query_count=" + std::to_string(result.statistics.seed_oriented_query_count), false);
+      logger->Info("statistics.seed_mam_tile_task_count=" + std::to_string(result.statistics.seed_mam_tile_task_count), false);
+      logger->Info("statistics.seed_mam_tile_tasks_completed=" + std::to_string(result.statistics.seed_mam_tile_tasks_completed), false);
+      logger->Info("statistics.seed_mam_short_query_task_count=" + std::to_string(result.statistics.seed_mam_short_query_task_count), false);
+      logger->Info("statistics.seed_mam_boundary_task_count=" + std::to_string(result.statistics.seed_mam_boundary_task_count), false);
+      logger->Info("statistics.seed_mam_boundary_tasks_completed=" + std::to_string(result.statistics.seed_mam_boundary_tasks_completed), false);
+      logger->Info("statistics.seed_mam_tile_raw_count=" + std::to_string(result.statistics.seed_mam_tile_raw_count), false);
+      logger->Info("statistics.seed_mam_tile_globally_maximal_count=" + std::to_string(result.statistics.seed_mam_tile_globally_maximal_count), false);
+      logger->Info("statistics.seed_mam_boundary_mem_raw_count=" + std::to_string(result.statistics.seed_mam_boundary_mem_raw_count), false);
+      logger->Info("statistics.seed_mam_boundary_pattern_count=" + std::to_string(result.statistics.seed_mam_boundary_pattern_count), false);
+      logger->Info("statistics.seed_mam_boundary_reference_unique_count=" + std::to_string(result.statistics.seed_mam_boundary_reference_unique_count), false);
+      logger->Info("statistics.seed_mam_boundary_recovered_count=" + std::to_string(result.statistics.seed_mam_boundary_recovered_count), false);
+      logger->Info("statistics.seed_mam_boundary_mem_occurrence_limit=" + std::to_string(result.statistics.seed_mam_boundary_mem_occurrence_limit), false);
+      logger->Info("statistics.seed_mam_workspace_baseline_bytes=" + std::to_string(result.statistics.seed_mam_workspace_baseline_bytes), false);
+      logger->Info("statistics.seed_mam_workspace_peak_bytes=" + std::to_string(result.statistics.seed_mam_workspace_peak_bytes), false);
+      logger->Info("statistics.seed_mam_workspace_limit_bytes=" + std::to_string(result.statistics.seed_mam_workspace_limit_bytes), false);
+      logger->Info("statistics.chaining_route=" + result.statistics.chaining_route, false);
+      logger->Info("statistics.chaining_candidate_pairs=" + std::to_string(result.statistics.chaining_candidate_pairs), false);
+      logger->Info("statistics.chaining_legal_edges=" + std::to_string(result.statistics.chaining_legal_edges), false);
+      logger->Info("statistics.chaining_components=" + std::to_string(result.statistics.chaining_components), false);
+      logger->Info("statistics.chaining_max_bucket_occupancy=" + std::to_string(result.statistics.chaining_max_bucket_occupancy), false);
+      logger->Info("statistics.chaining_max_component_seeds=" + std::to_string(result.statistics.chaining_max_component_seeds), false);
+      logger->Info("statistics.chaining_max_component_edges=" + std::to_string(result.statistics.chaining_max_component_edges), false);
+      logger->Info("statistics.chaining_dp_passes=" + std::to_string(result.statistics.chaining_dp_passes), false);
+      logger->Info("statistics.chaining_edge_relaxations=" + std::to_string(result.statistics.chaining_edge_relaxations), false);
+      logger->Info("statistics.chaining_working_set_peak_bytes=" + std::to_string(result.statistics.chaining_working_set_peak_bytes), false);
+      logger->Info("statistics.chaining_working_set_limit_bytes=" + std::to_string(result.statistics.chaining_working_set_limit_bytes), false);
+      logger->Info("statistics.chaining_candidate_pair_limit=" + std::to_string(result.statistics.chaining_candidate_pair_limit), false);
+      logger->Info("statistics.chaining_legal_edge_limit=" + std::to_string(result.statistics.chaining_legal_edge_limit), false);
+      logger->Info("statistics.chaining_edge_relaxation_limit=" + std::to_string(result.statistics.chaining_edge_relaxation_limit), false);
+      logger->Info("statistics.chaining_requested_threads=" + std::to_string(result.statistics.chaining_requested_threads), false);
+      logger->Info("statistics.chaining_worker_threads=" + std::to_string(result.statistics.chaining_worker_threads), false);
+      logger->Info("statistics.extension_worker_threads=" + std::to_string(result.statistics.extension_worker_threads), false);
+      logger->Info("statistics.seed_seconds=" + std::to_string(result.statistics.seed_seconds), false);
+      logger->Info("statistics.merge_seconds=" + std::to_string(result.statistics.merge_seconds), false);
+      logger->Info("statistics.chain_and_extension_seconds=" + std::to_string(result.statistics.chain_and_extension_seconds), false);
+      logger->Info("statistics.conflict_resolution_seconds=" + std::to_string(result.statistics.conflict_resolution_seconds), false);
+      logger->Info("statistics.total_seconds=" + std::to_string(result.statistics.total_seconds), false);
+      logger->Info("statistics.actual_seed_route=" + result.statistics.actual_seed_route, false);
+      logger->Info("pairwise.global_ksw_calls=" + std::to_string(result.statistics.pairwise.global_ksw_calls), false);
+      logger->Info("pairwise.endpoint_ksw_calls=" + std::to_string(result.statistics.pairwise.endpoint_ksw_calls), false);
+      logger->Info("pairwise.global_ksw_seconds=" + std::to_string(result.statistics.pairwise.global_ksw_seconds), false);
+      logger->Info("pairwise.endpoint_ksw_seconds=" + std::to_string(result.statistics.pairwise.endpoint_ksw_seconds), false);
+      logger->Info("pairwise.link_candidate_checks=" + std::to_string(result.statistics.pairwise.link_candidate_checks), false);
+      logger->Info("pairwise.link_direct_attempts=" + std::to_string(result.statistics.pairwise.link_direct_attempts), false);
+      logger->Info("pairwise.link_fallback_attempts=" + std::to_string(result.statistics.pairwise.link_fallback_attempts), false);
+      logger->Info("pairwise.link_long_gap_rejections=" + std::to_string(result.statistics.pairwise.link_long_gap_rejections), false);
+      logger->Info("pairwise.link_closure_failures=" + std::to_string(result.statistics.pairwise.link_closure_failures), false);
+      logger->Info("pairwise.seed_grouping_seconds=" + std::to_string(result.statistics.pairwise.seed_grouping_seconds), false);
+      logger->Info("pairwise.output_conversion_seconds=" + std::to_string(result.statistics.pairwise.output_conversion_seconds), false);
+      logger->Info("pairwise.recovery_enabled=" + std::to_string(result.statistics.pairwise.recovery_enabled), false);
+      logger->Info("pairwise.recovery_candidates_checked=" + std::to_string(result.statistics.pairwise.recovery_candidates_checked), false);
+      logger->Info("pairwise.recovery_proposed_fragments=" + std::to_string(result.statistics.pairwise.recovery_proposed_fragments), false);
+      logger->Info("pairwise.recovery_requeued_fragments=" + std::to_string(result.statistics.pairwise.recovery_requeued_fragments), false);
+      logger->Info("pairwise.recovery_accepted_fragments=" + std::to_string(result.statistics.pairwise.recovery_accepted_fragments), false);
+      logger->Info("pairwise.recovery_reference_bases=" + std::to_string(result.statistics.pairwise.recovery_reference_bases), false);
+      logger->Info("pairwise.recovery_query_bases=" + std::to_string(result.statistics.pairwise.recovery_query_bases), false);
+      logger->Info("pairwise.recovery_seconds=" + std::to_string(result.statistics.pairwise.recovery_seconds), false);
+      logger->Info("pairwise.gap_fill_strategy=" + result.statistics.pairwise.gap_fill_strategy, false);
+      logger->Info("pairwise.gap_fill_adjacent_pairs=" + std::to_string(result.statistics.pairwise.gap_fill_adjacent_pairs), false);
+      logger->Info("pairwise.gap_fill_geometry_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_geometry_rejected), false);
+      logger->Info("pairwise.gap_fill_occupied_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_occupied_rejected), false);
+      logger->Info("pairwise.gap_fill_flank_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_flank_rejected), false);
+      logger->Info("pairwise.gap_fill_n_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_n_rejected), false);
+      logger->Info("pairwise.gap_fill_candidates=" + std::to_string(result.statistics.pairwise.gap_fill_candidates), false);
+      logger->Info("pairwise.gap_fill_exact=" + std::to_string(result.statistics.pairwise.gap_fill_exact), false);
+      logger->Info("pairwise.gap_fill_ksw_calls=" + std::to_string(result.statistics.pairwise.gap_fill_ksw_calls), false);
+      logger->Info("pairwise.gap_fill_quality_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_quality_rejected), false);
+      logger->Info("pairwise.gap_fill_nonexact_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_nonexact_rejected), false);
+      logger->Info("pairwise.gap_fill_conflict_rejected=" + std::to_string(result.statistics.pairwise.gap_fill_conflict_rejected), false);
+      logger->Info("pairwise.gap_fill_accepted=" + std::to_string(result.statistics.pairwise.gap_fill_accepted), false);
+      logger->Info("pairwise.gap_fill_reference_bases=" + std::to_string(result.statistics.pairwise.gap_fill_reference_bases), false);
+      logger->Info("pairwise.gap_fill_query_bases=" + std::to_string(result.statistics.pairwise.gap_fill_query_bases), false);
+      logger->Info("pairwise.gap_fill_paired_columns=" + std::to_string(result.statistics.pairwise.gap_fill_paired_columns), false);
+      logger->Info("pairwise.gap_fill_ksw_seconds=" + std::to_string(result.statistics.pairwise.gap_fill_ksw_seconds), false);
+      logger->Info("pairwise.gap_fill_seconds=" + std::to_string(result.statistics.pairwise.gap_fill_seconds), false);
+      for (const auto& sample : result.statistics.memory_observations) {
+        logger->Info("memory stage=" + sample.stage + " rss_bytes=" + std::to_string(sample.rss_bytes) + " index_bytes=" + std::to_string(sample.index_estimated_bytes) + " seed_capacity_bytes=" + std::to_string(sample.seed_capacity_bytes) + " cluster_capacity_bytes=" + std::to_string(sample.cluster_capacity_bytes) + " anchor_capacity_bytes=" + std::to_string(sample.anchor_capacity_bytes) + " cigar_capacity_bytes=" + std::to_string(sample.cigar_capacity_bytes), false);
+      }
+      for (const auto& [name,value] : adapter_provenance) logger->Info("index/input " + name + "=" + value, false);
+      for (const auto& [name,seconds] : timings) logger->Info("timing stage=" + name + " seconds=" + std::to_string(seconds), false);
+      for (const auto& artifact : artifacts) logger->Info("artifact format=" + artifact.format + " path=" + artifact.path.string() + " bytes=" + std::to_string(artifact.bytes), false);
+      logger->Info("routes input=" + input_route + " parallel=" + input_parallel_route + " index=" + index_route + " seed=" + seeding_route + " requested_input_workers=" + std::to_string(input_requested_workers) + " actual_threads=" + std::to_string(actual_threads), false);
+      CheckInterruption("publication");
+      logger->Info("status=success exit_code=0 alignment_records=" + std::to_string(result.statistics.alignment_count) + " total_seconds=" + std::to_string(SecondsBetween(total_begin, Clock::now())));
+      logger->Flush();
+    }
     published_files.Commit();
 
     return {paths, result.statistics};
   } catch (const std::exception& error) {
-    WriteFailureDiagnostic(run_directory, run_id, stage, error);
+    try { if (logger) logger->Error("status=" + std::string(dynamic_cast<const InterruptedError*>(&error) ? "interrupted" : "failed") + " exit_code=" + std::to_string(FailureExitCode(error)) + " stage=" + stage + " retained_reference_index=" + retained_index.string() + " message=" + error.what()); } catch (...) {}
     throw;
   }
 }

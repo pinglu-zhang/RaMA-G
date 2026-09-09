@@ -13,6 +13,9 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <queue>
+#include <fstream>
+#include <filesystem>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -56,7 +59,7 @@ inline Length_t len2(const Match& m){return m.length;}
 inline int_t diag(const Match& m){return static_cast<int_t>(start2(m))-static_cast<int_t>(start1(m));}
 inline int_t diag_reverse(const Match& m){return -static_cast<int_t>(start2(m))-static_cast<int_t>(start1(m));}
 inline void releaseCluster(MatchVec& v){MatchVec().swap(v);}
-namespace SeqPro {
+namespace SequenceViews {
 struct SequenceManager {
  std::map<ChrIndex,const SequenceRecord*> records;
  explicit SequenceManager(std::span<const SequenceRecord> data){for(const auto& r:data) records.emplace(r.numeric_id,&r);}
@@ -107,6 +110,7 @@ struct Anchor {
 };
 
 using AnchorVec = std::vector<Anchor>;
+#include "pairwise_diagnostics.inc"
 class UnionFind
 {
 public:
@@ -557,6 +561,7 @@ MatchClusterVec buildClusters(std::span<Match> unique_match,
 
     // 再合并压缩（可能会删除元素、缩短 vector）
     filterAndMergeMatches(unique_match);
+    TraceMatches("merged",unique_match);
 
     // 重新获取 N
     const uint_t N = static_cast<uint_t>(unique_match.size());
@@ -711,10 +716,13 @@ MatchClusterVecPtr clusterChrMatch(std::span<Match> unique_match,
     best_chain_clusters->reserve(clusters.size());
 
     // 2) 每个簇选最佳链
+    uint64_t trace_cluster_id=0;
     for (auto& cluster : clusters) {
         if (cluster.empty()) continue;
+        TraceMatches("cluster",cluster,trace_cluster_id);
 
         MatchVec best_chain = bestChainDP(cluster, diagfactor);
+        TraceMatches("best-chain",best_chain,trace_cluster_id++);
 
         if (best_chain.empty()) {
             releaseCluster(cluster);
@@ -729,6 +737,7 @@ MatchClusterVecPtr clusterChrMatch(std::span<Match> unique_match,
 
         // 满足最小簇长度才保留
         if (span >= min_cluster_length) {
+            TraceMatches("supported-chain",best_chain,trace_cluster_id-1);
             best_chain_clusters->emplace_back(std::move(best_chain));
         }
 
@@ -1309,13 +1318,13 @@ struct ManagedSequenceSlice {
     KswSequenceView view;
 };
 
-const SeqPro::SequenceManager& originalSequenceManager(
-    const SeqPro::ManagerVariant& manager) {
-    return std::visit([](const auto& pointer) -> const SeqPro::SequenceManager& {
+const SequenceViews::SequenceManager& originalSequenceManager(
+    const SequenceViews::ManagerVariant& manager) {
+    return std::visit([](const auto& pointer) -> const SequenceViews::SequenceManager& {
         using Pointer = std::decay_t<decltype(pointer)>;
         if constexpr (std::is_same_v<
                           Pointer,
-                          std::unique_ptr<SeqPro::SequenceManager>>) {
+                          std::unique_ptr<SequenceViews::SequenceManager>>) {
             return *pointer;
         } else {
             return pointer->getOriginalManager();
@@ -1323,7 +1332,7 @@ const SeqPro::SequenceManager& originalSequenceManager(
     }, manager);
 }
 
-void loadSequenceSlice(const SeqPro::ManagerVariant& manager,
+void loadSequenceSlice(const SequenceViews::ManagerVariant& manager,
                        ChrIndex chromosome, Coord_t start, Coord_t length,
                        bool reverse_complement,
                        ManagedSequenceSlice& output) {
@@ -1358,8 +1367,8 @@ void appendCigarMove(Cigar_t& destination, Cigar_t& source) {
 }  // namespace
 
 Anchor extendClusterToAnchor(MatchCluster& cluster,
-    const SeqPro::ManagerVariant& ref_mgr,
-    const SeqPro::ManagerVariant& query_mgr) {
+    const SequenceViews::ManagerVariant& ref_mgr,
+    const SequenceViews::ManagerVariant& query_mgr) {
     if (cluster.empty()) return Anchor();
     Anchor anchor;
     const Match& first = cluster.front();
@@ -1453,8 +1462,8 @@ struct ComponentRange {
 
 AnchorVec materializeClusterAnchors(
     MatchClusterVec& clusters,
-    const SeqPro::ManagerVariant& ref_mgr,
-    const SeqPro::ManagerVariant& qry_mgr);
+    const SequenceViews::ManagerVariant& ref_mgr,
+    const SequenceViews::ManagerVariant& qry_mgr);
 
 std::vector<ComponentRange> splitAnchorComponents(
     const AnchorVec& anchors,
@@ -1464,8 +1473,8 @@ AnchorVec linkAnchorRange(
     AnchorVec& anchors,
     size_t begin,
     size_t end,
-    const SeqPro::ManagerVariant& ref_mgr,
-    const SeqPro::ManagerVariant& qry_mgr,
+    const SequenceViews::ManagerVariant& ref_mgr,
+    const SequenceViews::ManagerVariant& qry_mgr,
     Statistics* statistics = nullptr);
 
 }  // namespace AnchorLinkDetail
@@ -1508,8 +1517,8 @@ void observeGap(Statistics* statistics, int_t ref_gap, int_t query_gap,
 
 AnchorVec materializeClusterAnchors(
     MatchClusterVec& clusters,
-    const SeqPro::ManagerVariant& ref_mgr,
-    const SeqPro::ManagerVariant& qry_mgr) {
+    const SequenceViews::ManagerVariant& ref_mgr,
+    const SequenceViews::ManagerVariant& qry_mgr) {
     std::sort(clusters.begin(), clusters.end(),
         [](const MatchCluster& left, const MatchCluster& right) {
             if (left.empty() || right.empty()) {
@@ -1519,6 +1528,8 @@ AnchorVec materializeClusterAnchors(
         });
 
     MatchClusterVec cleaned;
+    for(size_t id=0;id<clusters.size();++id)
+        TraceMatches("pre-cleanup",clusters[id],id);
     cleaned.reserve(clusters.size());
     bool have_previous = false;
     ChrIndex previous_ref_chromosome = 0;
@@ -1582,6 +1593,8 @@ AnchorVec materializeClusterAnchors(
         cleaned.push_back(std::move(pruned));
     }
     clusters.swap(cleaned);
+    for(size_t id=0;id<clusters.size();++id)
+        TraceMatches("post-cleanup",clusters[id],id);
     MatchClusterVec().swap(cleaned);
 
     AnchorVec anchors;
@@ -1593,6 +1606,7 @@ AnchorVec materializeClusterAnchors(
         MatchCluster().swap(cluster);
     }
     MatchClusterVec().swap(clusters);
+    TraceAnchors("extended",anchors);
     return anchors;
 }
 
@@ -1675,8 +1689,8 @@ AnchorVec linkAnchorRange(
     AnchorVec& anchors,
     size_t begin,
     size_t end,
-    const SeqPro::ManagerVariant& ref_mgr,
-    const SeqPro::ManagerVariant& qry_mgr,
+    const SequenceViews::ManagerVariant& ref_mgr,
+    const SequenceViews::ManagerVariant& qry_mgr,
     Statistics* statistics) {
     if (begin > end || end > anchors.size()) {
         throw std::out_of_range("Invalid Anchor linking component range");
@@ -2242,74 +2256,6 @@ void filterAnchorsByDpTreap(std::span<size_t> result, AnchorVec& anchors, bool f
     }
 }
 
-void filterAnchorsByDpLegacy(std::span<size_t> result, AnchorVec& anchors, bool filter_ref) {
-    if (result.empty()) return;
-    std::sort(result.begin(), result.end(),
-        [filter_ref, &anchors](size_t left, size_t right) {
-            return filter_ref ? anchors[left].reference_begin < anchors[right].reference_begin
-                              : anchors[left].query_begin < anchors[right].query_begin;
-        });
-    std::vector<double> dp(result.size(), 0);
-    std::vector<int_t> pre(result.size(), -1);
-    const auto interval = [&](size_t index) {
-        if (filter_ref) {
-            return std::pair<long long, long long>{
-                static_cast<long long>(anchors[result[index]].reference_begin),
-                static_cast<long long>(anchors[result[index]].ref_len)};
-        }
-        return std::pair<long long, long long>{
-            static_cast<long long>(anchors[result[index]].query_begin),
-            static_cast<long long>(anchors[result[index]].qry_len)};
-    };
-    for (size_t index = 0; index < result.size(); ++index) {
-        const double identity = static_cast<float>(
-            anchors[result[index]].aligned_base) /
-            anchors[result[index]].alignment_length;
-        const double score = anchors[result[index]].alignment_length *
-            pow(identity, 2);
-        dp[index] = score;
-        const size_t begin = index > kDpWindow
-            ? index - kDpWindow : 0;
-        for (size_t previous = begin; previous < index; ++previous) {
-            const auto [previous_start, previous_length] = interval(previous);
-            const auto [current_start, current_length] = interval(index);
-            const long long previous_end =
-                previous_start + previous_length;
-            const long long current_end = current_start + current_length;
-            const long long overlap = std::max(
-                0LL, std::min(previous_end, current_end) -
-                         std::max(previous_start, current_start));
-            const long long shorter =
-                std::min(previous_length, current_length);
-            const double overlap_ratio = shorter > 0
-                ? static_cast<double>(overlap) /
-                    static_cast<double>(shorter)
-                : 0.0;
-            if (overlap_ratio <= 0.0) {
-                const double candidate = dp[previous] + score -
-                    static_cast<double>(overlap);
-                if (candidate > dp[index]) {
-                    dp[index] = candidate;
-                    pre[index] = static_cast<int_t>(previous);
-                }
-            }
-        }
-    }
-    double best = 0.0;
-    size_t best_index = 0;
-    for (size_t index = 0; index < result.size(); ++index) {
-        if (dp[index] > best) {
-            best = dp[index];
-            best_index = index;
-        }
-    }
-    for (int index = static_cast<int>(best_index); index >= 0;
-         index = pre[index]) {
-        if (filter_ref) anchors[result[index]].ref_selected = true;
-        else anchors[result[index]].qry_selected = true;
-        if (pre[index] == -1) break;
-    }
-}
 
 }  // namespace
 
@@ -2391,9 +2337,11 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
     if(rp!=r.reference_end || qp!=a.qry_len) throw AlignmentError("pairwise incomplete CIGAR consumption");
     return r;
 }
+#include "pairwise_recovery.inc"
+#include "pairwise_gap_fill.inc"
 } // namespace
 
-static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::vector<Seed> seeds,const PairwiseCoreOptions& o,bool selected_only,std::uint64_t& candidate_count) {
+static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::vector<Seed> seeds,const PairwiseCoreOptions& o,bool selected_only,std::uint64_t& candidate_count,pairwise_detail::DiagnosticSink* diagnostic=nullptr) {
     if(o.threads==0 || o.threads>static_cast<unsigned>(INT32_MAX) || o.min_cluster==0 || !std::isfinite(o.diag_factor) || o.diag_factor<0 || o.max_gap>static_cast<Length>(INT64_MAX/256) || o.diag_diff>static_cast<Length>(INT64_MAX/256)) throw AlignmentError("invalid pairwise core configuration");
     auto refs=CheckSequences(references), qrys=CheckSequences(queries);
     for(const auto& q:queries)if(static_cast<long double>(o.diag_factor)*q.size()>static_cast<long double>(INT64_MAX/2))throw AlignmentError("pairwise diagonal threshold cannot be represented");
@@ -2445,10 +2393,17 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
     result.statistics.seed_grouping_seconds=Elapsed(memory_begin);
     observe("core-seeds-grouped",0,0,0,groups.capacity()*sizeof(std::span<Seed>));
     result.workers=std::min(o.threads,static_cast<std::uint32_t>(std::min<std::size_t>(groups.size(),UINT32_MAX)));
+    if(diagnostic)diagnostic->seeds(seeds);
     KernelProgress(o,"chaining",0,groups.size());
     auto start=KernelClock::now();
     std::vector<pairwise_detail::MatchClusterVecPtr> clusters(groups.size());
-    ParallelKernel(groups.size(),o,[&](std::size_t i){KernelCheck(o,"chaining");clusters[i]=pairwise_detail::clusterChrMatch(groups[i],o.min_cluster,static_cast<std::int64_t>(o.max_gap),static_cast<std::int64_t>(o.diag_diff),o.diag_factor);});
+    ParallelKernel(groups.size(),o,[&](std::size_t i){
+        KernelCheck(o,"chaining");
+        pairwise_detail::DiagnosticGroupScope trace(diagnostic,i,"cluster");
+        pairwise_detail::TraceMatches("input",groups[i]);
+        clusters[i]=pairwise_detail::clusterChrMatch(groups[i],o.min_cluster,static_cast<std::int64_t>(o.max_gap),static_cast<std::int64_t>(o.diag_diff),o.diag_factor);
+        trace.finish();
+    });
     result.clustering_seconds=Elapsed(start);
     const size_t group_count=groups.size();
     // All span users have joined. Destroy views before releasing their owner.
@@ -2463,18 +2418,21 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
     observe("core-clustered-seeds-released",cluster_bytes);
     KernelProgress(o,"extension",0,group_count);
     start=KernelClock::now();
-    pairwise_detail::SeqPro::ManagerVariant rm{std::make_unique<pairwise_detail::SeqPro::SequenceManager>(references)};
-    pairwise_detail::SeqPro::ManagerVariant qm{std::make_unique<pairwise_detail::SeqPro::SequenceManager>(queries)};
+    pairwise_detail::SequenceViews::ManagerVariant rm{std::make_unique<pairwise_detail::SequenceViews::SequenceManager>(references)};
+    pairwise_detail::SequenceViews::ManagerVariant qm{std::make_unique<pairwise_detail::SequenceViews::SequenceManager>(queries)};
     std::vector<pairwise_detail::AnchorVec> extended(group_count);
     std::vector<PairwiseStatistics> group_statistics(group_count);
     std::vector<pairwise_detail::AnchorLinkDetail::Statistics> link_statistics(group_count);
     ParallelKernel(group_count,o,[&](std::size_t i){
         KernelCheck(o,"extension");
+        pairwise_detail::DiagnosticGroupScope trace(diagnostic,i,"extension");
         pairwise_detail::StatisticsScope statistics_scope(group_statistics[i]);
         auto anchors=pairwise_detail::AnchorLinkDetail::materializeClusterAnchors(*clusters[i],rm,qm);
         clusters[i].reset();
         const auto components=pairwise_detail::AnchorLinkDetail::splitAnchorComponents(anchors,&link_statistics[i]);
         for(const auto& component:components){KernelCheck(o,"extension");auto output=pairwise_detail::AnchorLinkDetail::linkAnchorRange(anchors,component.begin,component.end,rm,qm,&link_statistics[i]);extended[i].insert(extended[i].end(),std::make_move_iterator(output.begin()),std::make_move_iterator(output.end()));}
+        pairwise_detail::TraceAnchors("linked",extended[i]);
+        trace.finish();
     });
     result.extension_seconds=Elapsed(start);
     std::uint64_t extended_bytes=0,packed_bytes=0;
@@ -2507,6 +2465,7 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
     decltype(extended)().swap(extended);
     decltype(clusters)().swap(clusters);
     for(bool reference_side:{true,false}) {
+        if(diagnostic && reference_side)diagnostic->anchors("candidates",anchors);
         std::map<SequenceId,std::vector<size_t>> dimension;
         for(size_t index=0;index<anchors.size();++index) {
             const auto& anchor=anchors[index];
@@ -2519,11 +2478,29 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
         observe(reference_side?"core-reference-selection":"core-query-selection",0,
             anchors.capacity()*sizeof(pairwise_detail::Anchor),packed_bytes,task_bytes);
         ParallelKernel(tasks.size(),o,[&](std::size_t i){KernelCheck(o,"conflict-resolution");pairwise_detail::filterAnchorsByDpTreap(tasks[i],anchors,reference_side);});
+        if(diagnostic)diagnostic->anchors(reference_side?"reference-selected":"dual-selected",anchors);
     }
     result.selection_seconds=Elapsed(start);
     observe("core-selected",0,anchors.capacity()*sizeof(pairwise_detail::Anchor),packed_bytes);
     start=KernelClock::now();
     candidate_count=anchors.size();
+    const auto original_candidate_count=candidate_count;
+    result.statistics.recovery_enabled=o.recover_uncovered_fragments;
+    if(o.recover_uncovered_fragments) {
+        auto restored=RecoverResidualAnchors(anchors,refs,qrys,o,result.statistics);
+        if(restored.size()>SIZE_MAX-anchors.size())throw AlignmentError("recovery candidate count overflow");
+        anchors.insert(anchors.end(),std::make_move_iterator(restored.begin()),std::make_move_iterator(restored.end()));
+        // Includes emitted fragment candidates; original rejected parents remain
+        // distinct candidates, preventing subtraction underflow in statistics.
+        candidate_count=anchors.size();
+    }
+    const auto pre_fill_count=anchors.size();
+    if(o.gap_fill!=GapFillMode::Off) {
+        auto filled=FillGuardedGaps(anchors,original_candidate_count,refs,qrys,o,result.statistics);
+        if(filled.size()>SIZE_MAX-anchors.size())throw AlignmentError("gap-fill candidate count overflow");
+        anchors.insert(anchors.end(),std::make_move_iterator(filled.begin()),std::make_move_iterator(filled.end()));
+        candidate_count=anchors.size();
+    }
     const auto output_count=static_cast<size_t>(std::count_if(anchors.begin(),anchors.end(),[&](const auto& a) {
         return !selected_only||(a.ref_selected&&a.qry_selected);
     }));
@@ -2533,7 +2510,7 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
         const bool keep=!selected_only||(a.ref_selected&&a.qry_selected);
         // Always validate complete packed CIGAR and sequence consumption.
         auto record=ConvertAnchor(a,refs,qrys,keep);
-        if(keep)result.records.push_back({std::move(record),a.ref_selected,a.qry_selected,a.aligned_base,a.alignment_length});
+        if(keep)result.records.push_back({std::move(record),a.ref_selected,a.qry_selected,a.aligned_base,a.alignment_length,static_cast<size_t>(&a-anchors.data())>=original_candidate_count&&static_cast<size_t>(&a-anchors.data())<pre_fill_count,static_cast<size_t>(&a-anchors.data())>=pre_fill_count});
         pairwise_detail::Cigar_t().swap(a.cigar);
     }
     pairwise_detail::AnchorVec().swap(anchors);
@@ -2541,7 +2518,7 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
     std::uint64_t output_cigar_bytes=0;
     for(const auto& item:result.records)output_cigar_bytes+=item.record.cigar.capacity()*sizeof(CigarOp);
     observe("core-output-converted",0,result.records.capacity()*sizeof(PairwiseAlignment),output_cigar_bytes);
-    result.statistics.output_conversion_seconds=Elapsed(start);
+    result.statistics.output_conversion_seconds=Elapsed(start)-result.statistics.recovery_seconds-result.statistics.gap_fill_seconds;
     KernelProgress(o,"conflict-resolution",result.records.size(),result.records.size());
     return result;
 }
@@ -2551,12 +2528,69 @@ PairwiseCoreResult AlignPairwiseCore(std::span<const SequenceRecord> references,
     return AlignPairwiseCoreImpl(references,queries,std::vector<Seed>(seeds.begin(),seeds.end()),o,false,candidate_count);
 }
 
+void ResolveAlignmentRecords(std::vector<AlignmentRecord>& records, AlignmentSelection selection) {
+    pairwise_detail::AnchorVec anchors;
+    anchors.reserve(records.size());
+    for (const auto& r : records) {
+        if (r.reference_end <= r.reference_begin || r.query_end <= r.query_begin ||
+            r.reference_end > INT64_MAX || r.query_end > INT64_MAX) {
+            throw AlignmentError("pairwise record selection: invalid coordinate span");
+        }
+        std::uint64_t columns=0, matches=0, reference=0, query=0;
+        for (const auto& op : r.cigar) {
+            if (op.length==0 || columns>UINT64_MAX-op.length ||
+                (op.operation!='=' && op.operation!='X' && op.operation!='I' && op.operation!='D')) {
+                throw AlignmentError("pairwise record selection: invalid extended CIGAR");
+            }
+            columns+=op.length;
+            if(op.operation=='=')matches+=op.length;
+            if(op.operation!='I')reference+=op.length;
+            if(op.operation!='D')query+=op.length;
+        }
+        if(reference!=r.reference_end-r.reference_begin || query!=r.query_end-r.query_begin)
+            throw AlignmentError("pairwise record selection: CIGAR consumption mismatch");
+        anchors.emplace_back(r.reference_id,r.reference_begin,reference,r.query_id,r.query_begin,query,
+                             r.strand,columns,matches,pairwise_detail::Cigar_t{});
+    }
+    if(selection==AlignmentSelection::ReciprocalOneToOne) {
+        for(bool reference_side : {true,false}) {
+            std::map<SequenceId,std::vector<size_t>> groups;
+            for(size_t i=0;i<anchors.size();++i)
+                groups[reference_side?anchors[i].reference_id:anchors[i].query_id].push_back(i);
+            for(auto& [id,group]:groups) {
+                (void)id;
+                pairwise_detail::filterAnchorsByDpTreap(group,anchors,reference_side);
+            }
+        }
+    }
+    std::map<SequenceId,bool> primary;
+    std::vector<AlignmentRecord> selected;
+    for(size_t i=0;i<records.size();++i) {
+        if(selection==AlignmentSelection::ReciprocalOneToOne && !(anchors[i].ref_selected&&anchors[i].qry_selected))continue;
+        auto& record=records[i];record.primary=!primary[record.query_id];primary[record.query_id]=true;
+        selected.push_back(std::move(record));
+    }
+    records=std::move(selected);
+}
+
 AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,const std::vector<SequenceRecord>& queries,const AlignmentOptions& options,std::vector<Seed> seeds,RunStatistics stats) {
     if(options.break_length!=200 || options.max_dp_cells!=4000000 || options.match_score!=2 || options.mismatch_penalty!=4 || options.gap_open_penalty!=4 || options.gap_extend_penalty!=2)throw AlignmentError("legacy extension/scoring overrides are not applicable to the pairwise core");
     PairwiseCoreOptions o{options.max_gap,options.diag_diff,options.diag_factor,options.min_cluster,options.worker_threads,options.interruption_callback,options.progress_callback,options.resident_bytes_callback};
+#if defined(RAMAG_INTERNAL_COVERAGE_RECOVERY) && RAMAG_INTERNAL_COVERAGE_RECOVERY
+    o.recover_uncovered_fragments=options.selection==AlignmentSelection::ReciprocalOneToOne;
+#endif
+#if defined(RAMAG_INTERNAL_GAP_FILL) && RAMAG_INTERNAL_GAP_FILL
+    if(o.recover_uncovered_fragments)o.gap_fill=static_cast<GapFillMode>(RAMAG_INTERNAL_GAP_FILL);
+#endif
+    o.gap_fill_min_match=options.min_match;
     std::uint64_t candidate_count{};
     const auto seed_count=seeds.size();
-    auto result=AlignPairwiseCoreImpl(refs,queries,std::move(seeds),o,options.selection==AlignmentSelection::ReciprocalOneToOne,candidate_count);
+    std::unique_ptr<pairwise_detail::DiagnosticSink> diagnostic;
+#if defined(RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS) && RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS
+    if(const char* path=std::getenv("RAMAG_COVERAGE_DIAGNOSTIC_DIR"))
+        diagnostic=std::make_unique<pairwise_detail::DiagnosticSink>(path);
+#endif
+    auto result=AlignPairwiseCoreImpl(refs,queries,std::move(seeds),o,options.selection==AlignmentSelection::ReciprocalOneToOne,candidate_count,diagnostic.get());
     AlignmentResult output;
     output.statistics=std::move(stats);auto& s=output.statistics;
     s.pairwise=result.statistics;
@@ -2571,10 +2605,22 @@ AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,c
     s.chaining_route="pairwise-cluster-best-chain+component-link+dual-dp-v1";
     s.chaining_requested_threads=options.worker_threads;s.chaining_worker_threads=result.workers;s.extension_worker_threads=result.workers;
     s.chain_and_extension_seconds=result.clustering_seconds+result.extension_seconds;
-    s.conflict_resolution_seconds=result.selection_seconds;
+    s.conflict_resolution_seconds=result.selection_seconds+result.statistics.recovery_seconds+result.statistics.gap_fill_seconds;
     s.total_seconds=s.seed_seconds+s.chain_and_extension_seconds+s.conflict_resolution_seconds;
-    std::map<SequenceId,bool> primary;
-    for(auto& item:result.records){if(options.selection==AlignmentSelection::ReciprocalOneToOne&&!(item.reference_selected&&item.query_selected))continue;item.record.primary=!primary[item.record.query_id];primary[item.record.query_id]=true;output.alignments.push_back(std::move(item.record));}
+    std::map<SequenceId,size_t> primary;
+    const auto eligible=[&](const auto& item){return options.selection!=AlignmentSelection::ReciprocalOneToOne||(item.reference_selected&&item.query_selected);};
+    // Recovery may precede the original primary in coordinate order. Preserve
+    // that original designation; only queries with no old winner get a new one.
+    for(size_t i=0;i<result.records.size();++i){
+        const auto& item=result.records[i];
+        if(eligible(item)&&!item.recovered_fragment&&!item.gap_filled_fragment)primary.try_emplace(item.record.query_id,i);
+    }
+    for(size_t i=0;i<result.records.size();++i){
+        auto& item=result.records[i];if(!eligible(item))continue;
+        primary.try_emplace(item.record.query_id,i);
+        item.record.primary=primary.at(item.record.query_id)==i;
+        output.alignments.push_back(std::move(item.record));
+    }
     s.alignment_count=output.alignments.size();s.conflict_rejected_alignment_count=s.candidate_alignment_count-s.alignment_count;
     return output;
 }

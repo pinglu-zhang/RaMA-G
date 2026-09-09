@@ -278,7 +278,7 @@ void AppendSamCigarOperation(std::ostringstream& output,
 OutputPaths MakeOutputPaths(const std::filesystem::path& prefix) {
   const auto base = prefix.string();
   return {base + ".sam", base + ".paf", base + ".delta", base + ".maf",
-          base + ".chain", base + ".manifest.json", base + ".complete"};
+          base + ".chain"};
 }
 
 OutputPaths MakeOutputPaths(const RunSpec& spec) {

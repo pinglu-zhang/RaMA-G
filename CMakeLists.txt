@@ -12,19 +12,18 @@ set(RAMAG_EFFECTIVE_CXX_FLAGS
 
 include(CTest)
 include(GNUInstallDirs)
-set(RAMAG_INTERNAL_LCP_ENCODING "profile-default" CACHE STRING
+set(RAMAG_INTERNAL_LCP_ENCODING "byte-coded" CACHE STRING
     "Internal index LCP storage: profile-default, raw, byte-coded")
 set_property(CACHE RAMAG_INTERNAL_LCP_ENCODING PROPERTY STRINGS profile-default raw byte-coded)
 mark_as_advanced(RAMAG_INTERNAL_LCP_ENCODING)
 if(NOT RAMAG_INTERNAL_LCP_ENCODING MATCHES "^(profile-default|raw|byte-coded)$")
   message(FATAL_ERROR "Invalid RAMAG_INTERNAL_LCP_ENCODING: ${RAMAG_INTERNAL_LCP_ENCODING}")
 endif()
-set(RAMAG_INTERNAL_ALIGNMENT_CORE "legacy" CACHE STRING "Internal alignment core: legacy or pairwise")
-set_property(CACHE RAMAG_INTERNAL_ALIGNMENT_CORE PROPERTY STRINGS legacy pairwise)
-if(NOT RAMAG_INTERNAL_ALIGNMENT_CORE MATCHES "^(legacy|pairwise)$")
-  message(FATAL_ERROR "Unknown RAMAG_INTERNAL_ALIGNMENT_CORE: ${RAMAG_INTERNAL_ALIGNMENT_CORE}")
-endif()
-option(RAMAG_BUILD_PAIRWISE_LIBRARY "Build/install the independent graph-free pairwise core" OFF)
+foreach(obsolete IN ITEMS RAMAG_INTERNAL_ALIGNMENT_CORE RAMAG_INTERNAL_EXTENSION_BACKEND RAMAG_BUILD_PAIRWISE_LIBRARY)
+  if(DEFINED ${obsolete})
+    message(FATAL_ERROR "${obsolete} has been removed. Use a fresh build without this option; pairwise + KSW2 is now the only production core and is always installed.")
+  endif()
+endforeach()
 find_package(ZLIB REQUIRED)
 
 # Linux x86-64 is the v1 production platform.  OpenMP is therefore a required
@@ -58,22 +57,19 @@ option(RAMAG_BUILD_TESTS "Build RaMA-G tests" ON)
 option(RAMAG_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(RAMAG_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(RAMAG_ENABLE_PINNED_DEPENDENCIES
-       "Fetch/validate the pinned sufkit and SeqPro snapshots for production adapters" ON)
+       "Fetch/validate the pinned sufkit snapshot for production adapters" ON)
 set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
     "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
 set(RAMAG_SUFKIT_COMMIT "f8c4c386ee883e45ad0f973efc4c8e1148b0068a"
     CACHE STRING "Required sufkit commit")
-set(RAMAG_SEQPRO_COMMIT "6781cadcf81a0da53d7573444594c1484947017c"
-    CACHE STRING "Required SeqPro commit")
 set(RAMAG_SUFKIT_SOURCE_DIR "" CACHE PATH "Clean sufkit source override")
-set(RAMAG_SEQPRO_SOURCE_DIR "" CACHE PATH "Clean SeqPro source override")
 
 # Dependency identities are part of RaMA-G's reproducibility contract.  Do not
 # accept branch names, moving tags, abbreviated object names, or mixed-case
-# spellings that could make manifest/string equality ambiguous.
+# spellings that could make dependency identity ambiguous.
 foreach(_ramag_dependency_commit IN ITEMS
-    RAMAG_SUFKIT_COMMIT RAMAG_SEQPRO_COMMIT)
+    RAMAG_SUFKIT_COMMIT)
   string(LENGTH "${${_ramag_dependency_commit}}"
          _ramag_dependency_commit_length)
   if(NOT _ramag_dependency_commit_length EQUAL 40 OR
@@ -110,7 +106,6 @@ if(RAMAG_ENABLE_PINNED_DEPENDENCIES)
   include(RaMADependencies)
   ramag_configure_pinned_dependencies()
   FetchContent_GetProperties(sufkit SOURCE_DIR RAMAG_RESOLVED_SUFKIT_SOURCE_DIR)
-  FetchContent_GetProperties(seqpro SOURCE_DIR RAMAG_RESOLVED_SEQPRO_SOURCE_DIR)
 endif()
 
 function(ramag_apply_project_warnings target)
@@ -147,28 +142,21 @@ add_library(ramag_core
   src/alignment.cpp
   src/cli.cpp
   src/fasta.cpp
-  src/manifest.cpp
   src/pipeline.cpp
   src/reference_index.cpp
   src/runtime.cpp
-  src/seqpro_adapter.cpp
-  src/sha256.cpp
+  src/logging.cpp
   src/sufkit_adapter.cpp
   src/writers.cpp)
 add_library(RaMA-G::core ALIAS ramag_core)
 
-if(RAMAG_BUILD_PAIRWISE_LIBRARY OR RAMAG_INTERNAL_ALIGNMENT_CORE STREQUAL "pairwise")
-  include(cmake/RaMAGPairwiseCore.cmake)
-endif()
-if(RAMAG_INTERNAL_ALIGNMENT_CORE STREQUAL "pairwise")
-  target_link_libraries(ramag_core PRIVATE ramag_pairwise)
-  target_compile_definitions(ramag_core PUBLIC RAMAG_USE_PAIRWISE_CORE=1)
-else()
-  target_compile_definitions(ramag_core PUBLIC RAMAG_USE_PAIRWISE_CORE=0)
-endif()
+include(cmake/RaMAGPairwiseCore.cmake)
+target_link_libraries(ramag_core PRIVATE ramag_pairwise)
 
 target_compile_features(ramag_core PUBLIC cxx_std_20)
-target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB)
+find_package(Threads REQUIRED)
+target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB Threads::Threads)
+target_include_directories(ramag_core SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include ${PROJECT_SOURCE_DIR}/third_party/kseq)
 target_include_directories(
   ramag_core
   PUBLIC
@@ -181,7 +169,6 @@ target_compile_definitions(
     RAMAG_VERSION="${PROJECT_VERSION}"
     RAMAG_GIT_COMMIT="${RAMAG_GIT_COMMIT}"
     RAMAG_SUFKIT_COMMIT="${RAMAG_SUFKIT_COMMIT}"
-    RAMAG_SEQPRO_COMMIT="${RAMAG_SEQPRO_COMMIT}"
   PRIVATE
     RAMAG_CXX_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
     RAMAG_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
@@ -201,18 +188,14 @@ endif()
 if(RAMAG_ENABLE_PINNED_DEPENDENCIES)
   target_compile_definitions(ramag_core PRIVATE
     RAMAG_HAVE_SUFKIT=1
-    RAMAG_HAVE_SEQPRO=1
     RAMAG_DEPENDENCY_MODE="pinned-production-adapters"
-    RAMAG_SUFKIT_SOURCE_PATH="${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}"
-    RAMAG_SEQPRO_SOURCE_PATH="${RAMAG_RESOLVED_SEQPRO_SOURCE_DIR}")
-  target_link_libraries(ramag_core PRIVATE sufkit::sufkit SeqPro::seqpro)
+    RAMAG_SUFKIT_SOURCE_PATH="${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}")
+  target_link_libraries(ramag_core PRIVATE sufkit::sufkit)
 else()
   target_compile_definitions(ramag_core PRIVATE
     RAMAG_HAVE_SUFKIT=0
-    RAMAG_HAVE_SEQPRO=0
     RAMAG_DEPENDENCY_MODE="bundled-oracle-baseline"
-    RAMAG_SUFKIT_SOURCE_PATH="not-linked"
-    RAMAG_SEQPRO_SOURCE_PATH="not-linked")
+    RAMAG_SUFKIT_SOURCE_PATH="not-linked")
 endif()
 
 ramag_apply_project_warnings(ramag_core)
@@ -229,14 +212,22 @@ ramag_apply_project_warnings(ramag)
 install(TARGETS ramag RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag")
 
-if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
-   NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
-  message(STATUS
-    "RaMA-G test sources are not included; skipping test targets")
-endif()
-
-if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
-   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit_tests.cpp")
+  if(TARGET sufkit::sufkit)
+    add_executable(ramag_index_storage_tests tests/index_storage_tests.cpp)
+    target_link_libraries(ramag_index_storage_tests PRIVATE RaMA-G::core sufkit::sufkit)
+    ramag_apply_project_warnings(ramag_index_storage_tests)
+    add_test(NAME ramag.index_storage COMMAND ramag_index_storage_tests)
+  endif()
+  add_executable(ramag_logging_input_tests tests/logging_input_tests.cpp)
+  target_include_directories(ramag_logging_input_tests SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include)
+  target_link_libraries(ramag_logging_input_tests PRIVATE RaMA-G::core Threads::Threads)
+  ramag_apply_project_warnings(ramag_logging_input_tests)
+  add_test(NAME ramag.logging_input COMMAND ramag_logging_input_tests)
+  add_executable(ramag_unified_core_tests tests/unified_core_tests.cpp)
+  target_link_libraries(ramag_unified_core_tests PRIVATE RaMA-G::core RaMAG::pairwise)
+  ramag_apply_project_warnings(ramag_unified_core_tests)
+  add_test(NAME ramag.unified.core COMMAND ramag_unified_core_tests)
   if(TARGET ramag_pairwise AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/pairwise_core_tests.cpp")
     add_library(ramag_pairwise_reference OBJECT tests/pairwise_reference_gap.cpp)
     target_compile_features(ramag_pairwise_reference PRIVATE cxx_std_20)
@@ -247,8 +238,12 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
     ramag_apply_project_warnings(ramag_pairwise_core_tests)
     add_test(NAME ramag.pairwise.core COMMAND ramag_pairwise_core_tests)
   endif()
+  add_library(ramag_legacy_oracle STATIC tests/legacy_alignment_oracle.cpp)
+  target_link_libraries(ramag_legacy_oracle PRIVATE RaMA-G::core)
+  target_compile_features(ramag_legacy_oracle PRIVATE cxx_std_20)
+  ramag_apply_project_warnings(ramag_legacy_oracle)
   add_executable(ramag_unit_tests tests/unit_tests.cpp)
-  target_link_libraries(ramag_unit_tests PRIVATE RaMA-G::core)
+  target_link_libraries(ramag_unit_tests PRIVATE ramag_legacy_oracle RaMA-G::core)
   ramag_apply_project_warnings(ramag_unit_tests)
   add_test(NAME ramag.unit COMMAND ramag_unit_tests)
 
@@ -269,6 +264,28 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
       -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/openmp-required-configure
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/openmp_required.cmake)
 
+  if(TARGET ramag_pairwise)
+    add_executable(ramag_coverage_replay tests/coverage_replay.cpp)
+    target_link_libraries(ramag_coverage_replay PRIVATE ramag_pairwise RaMA-G::core)
+    target_include_directories(ramag_coverage_replay PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
+    # This private harness includes the source-attributed kernel, so use the
+    # same warning contract as that kernel (without weakening production).
+    if(NOT MSVC)
+      target_compile_options(ramag_coverage_replay PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter)
+      if(RAMAG_WARNINGS_AS_ERRORS)
+        target_compile_options(ramag_coverage_replay PRIVATE -Werror)
+      endif()
+    endif()
+    add_executable(ramag_pairwise_memory_tests tests/pairwise_memory_tests.cpp)
+    target_compile_definitions(ramag_pairwise_memory_tests PRIVATE RAMAG_INTERNAL_COVERAGE_RECOVERY=$<BOOL:${RAMAG_INTERNAL_COVERAGE_RECOVERY}>)
+    target_link_libraries(ramag_pairwise_memory_tests PRIVATE ramag_pairwise)
+    target_include_directories(ramag_pairwise_memory_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
+    if(OpenMP_CXX_FOUND)
+      target_link_libraries(ramag_pairwise_memory_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    add_test(NAME ramag.pairwise.memory COMMAND ramag_pairwise_memory_tests)
+  endif()
+
   add_executable(ramag_seed_oracle_tests tests/seed_oracle_tests.cpp)
   target_link_libraries(ramag_seed_oracle_tests PRIVATE RaMA-G::core)
   ramag_apply_project_warnings(ramag_seed_oracle_tests)
@@ -281,7 +298,7 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
   add_test(NAME ramag.adapter_differential COMMAND ramag_adapter_differential_tests)
 
   add_executable(ramag_chaining_tests tests/chaining_tests.cpp)
-  target_link_libraries(ramag_chaining_tests PRIVATE RaMA-G::core)
+  target_link_libraries(ramag_chaining_tests PRIVATE ramag_legacy_oracle RaMA-G::core)
   ramag_apply_project_warnings(ramag_chaining_tests)
   if(RAMAG_ENABLE_SANITIZERS)
     add_test(NAME ramag.chaining COMMAND ramag_chaining_tests --skip-scale)
@@ -316,7 +333,7 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND
       -DEXPECTED_DIVSUFSORT_OPENMP=${RAMAG_SUFKIT_DIVSUFSORT_OPENMP_VALUE}
       -DEXPECT_PINNED_ADAPTERS=${RAMAG_ENABLE_PINNED_DEPENDENCIES}
       -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/integration-smoke
-      -DRAMAG_ALIGNMENT_CORE=${RAMAG_INTERNAL_ALIGNMENT_CORE}
+      -DRAMAG_ALIGNMENT_CORE=pairwise
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_smoke.cmake)
 
   if(UNIX)

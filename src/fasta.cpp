@@ -13,6 +13,10 @@
 #include <unordered_set>
 
 #include <zlib.h>
+#include <deque>
+#include <memory>
+#include <climits>
+#include <kseq.h>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -139,65 +143,78 @@ void CheckedIncrement(Length& value, Length increment, const std::string& what) 
     value += increment;
 }
 
-void ForEachPlainLine(const std::filesystem::path& path,
-                      const std::function<void(std::string)>& callback) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) throw FastaError("cannot open FASTA '" + PathForMessage(path) + "'");
-    std::string line;
-    while (std::getline(input, line)) {
-        CheckInterruption("input");
-        callback(std::move(line));
+// Validates the unmodified stream before kseq can skip malformed content or
+// interpret FASTQ. Full headers are retained independently of kseq tokenization.
+struct FastaStream {
+    gzFile file{};
+    std::filesystem::path path;
+    std::uint64_t line{1};
+    bool start{true}, header{}, saw_header{}, pending_cr{};
+    std::size_t record_bases{};
+    std::string header_text;
+    std::deque<std::string> headers;
+    ~FastaStream() { if (file) gzclose(file); }
+    void EndLine() {
+        if (header) {
+            const auto text = TrimmedHeaderText(">" + header_text);
+            if (text.empty()) ThrowLineError(path, line, "header has no identifier");
+            headers.push_back(text);
+            header_text.clear();
+        } else if (!saw_header) {
+            ThrowLineError(path, line, "blank content before the first header");
+        }
+        ++line; start = true; header = false; pending_cr = false;
     }
-    if (input.bad()) {
-        throw FastaError("I/O error while reading FASTA '" + PathForMessage(path) + "'");
+    void Inspect(char character) {
+        if (character == '\n') { EndLine(); return; }
+        if (pending_cr) ThrowLineError(path, line, "embedded carriage return");
+        if (character == '\r') { pending_cr = true; return; }
+        if (start) {
+            start = false;
+            if (character == '>') {
+                header = true; saw_header = true; record_bases = 0; return;
+            }
+            if (!saw_header) ThrowLineError(path, line, "sequence data appears before a header (FASTA required)");
+        }
+        if (header) {
+            if (character == '\0') ThrowLineError(path, line, "NUL in header");
+            header_text.push_back(character);
+        } else {
+            const auto c = static_cast<unsigned char>(character);
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')))
+                ThrowLineError(path, line, "invalid sequence character");
+            // The frozen kseq API returns an int length. Never allow wraparound
+            // to be interpreted as EOF or success.
+            if (++record_bases > static_cast<std::size_t>(INT_MAX))
+                throw FastaError("single FASTA record exceeds kseq's INT_MAX length");
+        }
     }
+};
+
+int ReadKseqStream(FastaStream* stream, void* destination, int length) {
+    CheckInterruption("input");
+    const int count = gzread(stream->file, destination, static_cast<unsigned int>(length));
+    int code = Z_OK;
+    const char* message = gzerror(stream->file, &code);
+    if (count < 0 || (code != Z_OK && code != Z_STREAM_END))
+        throw FastaError("invalid or truncated FASTA stream '" + stream->path.string() + "': " + (message ? message : "read error"));
+    const auto* bytes = static_cast<const char*>(destination);
+    for (int i = 0; i < count; ++i) stream->Inspect(bytes[i]);
+    if (count == 0 && (!stream->start || stream->pending_cr)) stream->EndLine();
+    return count;
 }
 
-void ForEachGzipLine(const std::filesystem::path& path,
-                     const std::function<void(std::string)>& callback) {
-    gzFile input = gzopen(path.c_str(), "rb");
-    if (input == nullptr) {
-        throw FastaError("cannot open gzip FASTA '" + PathForMessage(path) + "'");
-    }
-    std::array<char, 64U * 1024U> buffer{};
-    std::string line;
-    try {
-        while (true) {
-            CheckInterruption("input");
-            const int available = gzread(input, buffer.data(),
-                                         static_cast<unsigned int>(buffer.size()));
-            if (available < 0) {
-                int code = Z_OK;
-                const char* message = gzerror(input, &code);
-                throw FastaError("invalid or truncated gzip FASTA '" +
-                                 PathForMessage(path) + "': " +
-                                 (message == nullptr ? "zlib read error" : message));
-            }
-            if (available == 0) break;
-            for (int index = 0; index < available; ++index) {
-                const char value = buffer[static_cast<std::size_t>(index)];
-                if (value == '\n') {
-                    callback(std::move(line));
-                    line.clear();
-                } else {
-                    if (line.size() == std::numeric_limits<std::size_t>::max()) {
-                        throw FastaError("gzip FASTA line is too large");
-                    }
-                    line.push_back(value);
-                }
-            }
-        }
-        if (!line.empty()) callback(std::move(line));
-    } catch (...) {
-        gzclose(input);
-        throw;
-    }
-    const int close_result = gzclose(input);
-    if (close_result != Z_OK) {
-        throw FastaError("gzip integrity validation failed for '" +
-                         PathForMessage(path) + "'");
-    }
-}
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+#pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+KSEQ_INIT(FastaStream*, ReadKseqStream)
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 }  // namespace
 
@@ -327,117 +344,48 @@ FastaCompression DetectFastaCompression(const std::filesystem::path& path) {
 }
 
 FastaData ReadFasta(const std::filesystem::path& path, SequenceId first_id) {
-    const auto compression = DetectFastaCompression(path);
+    (void)DetectFastaCompression(path);
     FastaData result;
-    std::error_code absolute_error;
-    result.source = std::filesystem::absolute(path, absolute_error);
-    if (absolute_error) {
-        result.source = path;
+    std::error_code error;
+    result.source = std::filesystem::absolute(path, error);
+    if (error) result.source = path;
+    FastaStream stream;
+    stream.path = path;
+    stream.file = gzopen(path.string().c_str(), "rb");
+    if (!stream.file) throw FastaError("cannot open FASTA '" + path.string() + "'");
+    gzbuffer(stream.file, 64U * 1024U);
+    std::unique_ptr<kseq_t, decltype(&kseq_destroy)> sequence(kseq_init(&stream), kseq_destroy);
+    if (!sequence) throw std::bad_alloc{};
+    std::unordered_set<std::string> seen;
+    while (true) {
+        CheckInterruption("input");
+        const int count = kseq_read(sequence.get());
+        if (count == -1) break;
+        if (count < 0) throw FastaError("invalid FASTA record in '" + path.string() + "'");
+        if (stream.headers.empty()) throw FastaError("FASTA header parser mismatch");
+        SequenceRecord record;
+        record.header = std::move(stream.headers.front()); stream.headers.pop_front();
+        record.name = HeaderId(record.header);
+        if (!seen.insert(record.name).second) throw FastaError("duplicate record identifier '" + record.name + "'");
+        if (sequence->seq.l == 0) throw FastaError("FASTA record '" + record.name + "' has an empty sequence");
+        if (result.sequences.size() > std::numeric_limits<SequenceId>::max() - first_id)
+            throw FastaError("FASTA contains too many records for 32-bit sequence ids");
+        record.numeric_id = static_cast<SequenceId>(first_id + result.sequences.size());
+        record.bases.resize(sequence->seq.l);
+        for (std::size_t i=0; i<sequence->seq.l; ++i) {
+            if ((i & 65535U) == 0) CheckInterruption("input");
+            record.bases[i] = NormalizeBase(static_cast<unsigned char>(sequence->seq.s[i]));
+            if (record.bases[i] == 'N') CheckedIncrement(result.ambiguous_bases, 1, "FASTA ambiguous-base count");
+        }
+        CheckedIncrement(result.total_bases, record.size(), "FASTA base count");
+        result.sequences.push_back(std::move(record));
     }
-
-    std::unordered_set<std::string> seen_names;
-    std::uint64_t line_number = 0;
-    SequenceRecord current;
-    bool have_record = false;
-    bool saw_any_content = false;
-
-    auto finish_record = [&]() {
-        if (!have_record) {
-            return;
-        }
-        if (current.bases.empty()) {
-            throw FastaError("FASTA record '" + current.name + "' in '" +
-                             PathForMessage(path) + "' has an empty sequence");
-        }
-        result.sequences.push_back(std::move(current));
-        current = SequenceRecord{};
-        have_record = false;
-    };
-
-    const auto consume_line = [&](std::string line) {
-        ++line_number;
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (line.empty()) {
-            if (!have_record) {
-                ThrowLineError(path, line_number, "blank content before the first header");
-            }
-            // Blank lines inside a record do not contribute bases.  A record
-            // made only of blank lines is still rejected by finish_record().
-            return;
-        }
-        saw_any_content = true;
-
-        if (line.front() == '>') {
-            finish_record();
-            const std::string header = TrimmedHeaderText(line);
-            if (header.empty()) {
-                ThrowLineError(path, line_number, "header has no identifier");
-            }
-            const std::string name = HeaderId(header);
-            if (name.empty()) {
-                ThrowLineError(path, line_number, "header has no identifier");
-            }
-            if (!seen_names.insert(name).second) {
-                ThrowLineError(path, line_number, "duplicate record identifier '" + name + "'");
-            }
-            const std::uint64_t offset = static_cast<std::uint64_t>(result.sequences.size());
-            if (offset > static_cast<std::uint64_t>(
-                             std::numeric_limits<SequenceId>::max() - first_id)) {
-                throw FastaError("FASTA contains too many records for 32-bit sequence ids");
-            }
-            current.numeric_id = static_cast<SequenceId>(first_id + offset);
-            current.name = name;
-            current.header = header;
-            have_record = true;
-            return;
-        }
-
-        if (!have_record) {
-            ThrowLineError(path, line_number, "sequence data appears before a header");
-        }
-
-        if (line.size() > std::numeric_limits<std::size_t>::max() - current.bases.size()) {
-            throw FastaError("FASTA record '" + current.name + "' is too large");
-        }
-        current.bases.reserve(current.bases.size() + line.size());
-        for (std::size_t column = 0; column < line.size(); ++column) {
-            const unsigned char base = static_cast<unsigned char>(line[column]);
-            if (std::isalpha(base) == 0) {
-                std::ostringstream message;
-                message << "invalid sequence character at column " << (column + 1);
-                ThrowLineError(path, line_number, message.str());
-            }
-            const char normalized = NormalizeBase(base);
-            current.bases.push_back(normalized);
-            CheckedIncrement(result.total_bases, 1, "FASTA base count");
-            if (normalized == 'N') {
-                CheckedIncrement(result.ambiguous_bases, 1, "FASTA ambiguous-base count");
-            }
-        }
-    };
-    if (compression == FastaCompression::Gzip) {
-        ForEachGzipLine(path, consume_line);
-    } else {
-        ForEachPlainLine(path, consume_line);
-    }
-    if (!saw_any_content) {
-        throw FastaError("FASTA is empty: '" + PathForMessage(path) + "'");
-    }
-    finish_record();
-    if (result.sequences.empty()) {
-        throw FastaError("FASTA contains no records: '" + PathForMessage(path) + "'");
-    }
+    if (!stream.headers.empty()) throw FastaError("FASTA contains an unparsed record");
+    if (result.sequences.empty()) throw FastaError("FASTA is empty: '" + path.string() + "'");
+    sequence.reset();
+    gzFile closing = stream.file; stream.file = nullptr;
+    if (gzclose(closing) != Z_OK) throw FastaError("FASTA stream close failed: '" + path.string() + "'");
     return result;
-}
-
-void ValidateUncompressedFasta(const std::filesystem::path& path) {
-    if (DetectFastaCompression(path) != FastaCompression::Plain) {
-        throw UnsupportedFastaFormat(
-            "SeqPro mmap input requires uncompressed FASTA: '" +
-            PathForMessage(path) + "'");
-    }
 }
 
 }  // namespace ramag
