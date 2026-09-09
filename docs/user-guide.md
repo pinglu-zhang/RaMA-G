@@ -19,7 +19,7 @@ ctest --test-dir build-release --output-on-failure
 Internal checkouts contain tests; public release trees need not. CTest verifies
 only tests available in the selected checkout. Absence of tests does not prevent
 building the program. Sufkit is fixed to
-`f8c4c386ee883e45ad0f973efc4c8e1148b0068a`; a local override must have that exact
+`028075e6f2d622fcbdcf76b153bbde0f069ca64f`; a local override must have that exact
 HEAD and a clean worktree. Disable pinned dependencies only for internal oracle
 development. RaMA-G no longer depends directly on SeqPro.
 

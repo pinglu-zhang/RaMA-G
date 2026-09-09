@@ -38,7 +38,7 @@ Reference and query reading retain stable result/error slots and may use two
 OpenMP workers within the requested budget. No exception crosses an OpenMP
 structured block. The full normalized inputs remain materialized.
 
-Sufkit stays at `f8c4c386ee883e45ad0f973efc4c8e1148b0068a`. Its exact clean checkout
+Sufkit stays at `028075e6f2d622fcbdcf76b153bbde0f069ca64f`. Its exact clean checkout
 is checked at configuration; its optional SeqPro integration remains disabled.
 KSW2, kseq and spdlog are vendored; spdlog uses bundled fmt. kseq/spdlog snapshots
 come from the frozen source revision recorded in the root third-party notices.

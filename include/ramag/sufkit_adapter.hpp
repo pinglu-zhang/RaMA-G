@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -16,7 +18,7 @@ namespace ramag {
 // CMake is responsible for rejecting a source-directory override whose clean
 // HEAD differs from this value.
 inline constexpr std::string_view kRequiredSufkitCommit =
-    "f8c4c386ee883e45ad0f973efc4c8e1148b0068a";
+    "028075e6f2d622fcbdcf76b153bbde0f069ca64f";
 
 struct SufkitIndexOptions {
     // One shared RaMA-G thread budget is reused by sequential stages: first
@@ -51,9 +53,15 @@ struct SufkitIndexOptions {
         6ULL * 1024ULL * 1024ULL * 1024ULL};
     void (*build_stage_callback)(const char*, void*) = nullptr;
     void* build_stage_context = nullptr;
+    std::function<void(std::string_view)> load_stage_callback{};
 };
 
 struct SufkitIndexStatistics {
+    std::map<std::string, double> load_stage_seconds;
+    double sufkit_load_seconds{};
+    double reference_validation_seconds{};
+    double load_crc_seconds{};
+    std::uint64_t load_logical_read_bytes{};
     std::uint32_t requested_threads{1};
     std::uint64_t parallel_caps_min_reference_bases{};
     std::uint32_t sampling_rate{1};

@@ -6,7 +6,7 @@ The root license retains both RaMA-G contributor and Pinglu Zhang copyright.
 ## Sufkit
 
 The separately maintained library https://github.com/malabz/sufkit is fixed to
-`f8c4c386ee883e45ad0f973efc4c8e1148b0068a` and obtained by CMake. Its own license
+`028075e6f2d622fcbdcf76b153bbde0f069ca64f` and obtained by CMake. Its own license
 applies when fetched/linked. RaMA-G does not directly depend on SeqPro.
 
 ## KSW2

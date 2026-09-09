@@ -61,7 +61,7 @@ option(RAMAG_ENABLE_PINNED_DEPENDENCIES
 set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
     "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
-set(RAMAG_SUFKIT_COMMIT "f8c4c386ee883e45ad0f973efc4c8e1148b0068a"
+set(RAMAG_SUFKIT_COMMIT "028075e6f2d622fcbdcf76b153bbde0f069ca64f"
     CACHE STRING "Required sufkit commit")
 set(RAMAG_SUFKIT_SOURCE_DIR "" CACHE PATH "Clean sufkit source override")
 

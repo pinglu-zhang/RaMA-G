@@ -894,7 +894,12 @@ SufkitSeedIndex SufkitSeedIndex::Load(
     }
     try {
         const auto begin = Clock::now();
-        auto index = sufkit::SuffixArray::Load(path);
+        sufkit::SuffixArrayLoadStatistics load_statistics;
+        sufkit::SuffixArrayLoadOptions load_options;
+        load_options.threads = options.threads;
+        load_options.statistics = &load_statistics;
+        load_options.stage_callback = options.load_stage_callback;
+        auto index = sufkit::SuffixArray::Load(path, load_options);
         const auto info = index.GetInfo();
         if (info.kind != sufkit::IndexKind::kSuffixArray ||
             index.SamplingRate() != 1 || info.sa_sampling_rate != 1) {
@@ -914,12 +919,15 @@ SufkitSeedIndex SufkitSeedIndex::Load(
                 "reference index contig count differs from --reference");
         }
 
-        std::vector<sufkit::SequenceRecord> sufkit_records;
+        const auto reference_validation_begin = Clock::now();
+        std::vector<sufkit::ReferenceSequenceView> sufkit_records;
         std::vector<SequenceId> reference_ids;
         std::vector<std::string> reference_names;
         std::vector<Length> reference_lengths;
         std::vector<std::uint64_t> reference_content_hashes;
         sufkit_records.reserve(references.size());
+        std::vector<std::string> descriptions;
+        descriptions.reserve(references.size());
         reference_ids.reserve(references.size());
         reference_names.reserve(references.size());
         reference_lengths.reserve(references.size());
@@ -928,7 +936,8 @@ SufkitSeedIndex SufkitSeedIndex::Load(
             const auto& record = references[ordinal];
             const auto stored = index.GetSequenceInfo(
                 static_cast<sufkit::SequenceId>(ordinal));
-            const auto description = RecordDescription(record);
+            descriptions.push_back(RecordDescription(record));
+            const auto& description = descriptions.back();
             const auto ambiguous = static_cast<std::uint64_t>(
                 std::count(record.bases.begin(), record.bases.end(), 'N'));
             if (stored.id != static_cast<sufkit::SequenceId>(ordinal) ||
@@ -941,24 +950,26 @@ SufkitSeedIndex SufkitSeedIndex::Load(
                     std::to_string(ordinal) + " ('" + record.name + "')");
             }
             sufkit_records.push_back(
-                sufkit::SequenceRecord{record.name, description, record.bases});
+                sufkit::ReferenceSequenceView{record.name, description, record.bases});
             reference_ids.push_back(record.numeric_id);
             reference_names.push_back(record.name);
             reference_lengths.push_back(record.size());
             reference_content_hashes.push_back(StableSequenceHash(record.bases));
         }
-        auto normalized_reference =
-            sufkit::GenomeReference::FromRecords(std::move(sufkit_records));
-        if (normalized_reference.Fingerprint() != info.fingerprint) {
-            throw DependencyError(
-                "reference index normalized-content fingerprint differs from --reference");
-        }
+        index.ValidateReference(sufkit_records);
         auto statistics = ConvertIndexStatistics(
             info, options, ElapsedSeconds(begin));
+        statistics.load_stage_seconds = load_statistics.stage_seconds;
+        statistics.sufkit_load_seconds = load_statistics.total_seconds;
+        statistics.reference_validation_seconds = ElapsedSeconds(reference_validation_begin);
+        statistics.load_crc_seconds = load_statistics.crc_seconds;
+        statistics.load_logical_read_bytes = load_statistics.logical_read_bytes;
         return SufkitSeedIndex(std::make_unique<Impl>(
             std::move(reference_ids), std::move(reference_names),
             std::move(reference_lengths), std::move(reference_content_hashes),
             std::move(index), std::move(statistics), options));
+    } catch (const InterruptedError&) {
+        throw;
     } catch (const DependencyError&) {
         throw;
     } catch (const AlignmentError&) {

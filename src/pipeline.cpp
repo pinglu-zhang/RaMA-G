@@ -463,6 +463,14 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       core_index_options.mam_worker_cap = spec.threads;
       core_index_options.mam_workspace_limit_bytes = UINT64_MAX;
       core_index_options.boundary_mem_occurrence_limit = UINT64_MAX;
+      std::string last_load_stage;
+      core_index_options.load_stage_callback = [&](std::string_view phase) {
+        CheckInterruption("index-load");
+        if (phase != last_load_stage) {
+          last_load_stage = phase;
+          progress.Stage("index-load:" + last_load_stage);
+        }
+      };
       auto index = [&]() {
         if (load_persistent_index) {
           return SufkitSeedIndex::Load(
@@ -480,6 +488,17 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       timings[load_persistent_index ? "index_load" : "index_build"] =
           index_seconds;
       adapter_provenance["sufkit.index.save_path"] = spec.save_index_path.string();
+      if (load_persistent_index) {
+        const auto& loaded = index.BuildStatistics();
+        for (const auto& [phase, seconds] : loaded.load_stage_seconds)
+          timings["index_load_" + phase] = seconds;
+        timings["sufkit_load_total"] = loaded.sufkit_load_seconds;
+        timings["index_reference_validation"] = loaded.reference_validation_seconds;
+        if (logger) logger->Info("index_action=loaded requested_threads=" +
+            std::to_string(spec.threads) + " lcp_encoding=" + loaded.lcp_encoding +
+            " logical_read_bytes=" + std::to_string(loaded.load_logical_read_bytes) +
+            " crc_cpu_seconds=" + std::to_string(loaded.load_crc_seconds), false);
+      }
       adapter_provenance["sufkit.index.persisted"] = "false";
       if (!spec.save_index_path.empty()) {
         stage = "index-save";
