@@ -59,6 +59,26 @@ capabilities. Contig catalog and Sufkit reference fingerprint are compared again
 the supplied reference. No SHA-256 or sidecar identity is used. Raw and byte-coded
 files retain their stored representation; loading never rebuilds implicitly.
 
+RaMA-G supplies the caller's thread budget to `SuffixArray::Load(path, options)`.
+The original Sufkit `Load(path)` overload remains single-threaded by default.
+On Linux the loader checks that the requested budget fits the allowed CPU set.
+Bounded section readers accumulate CRC while decoding; all sections, including
+unconsumed ones, must pass CRC before an index is returned. Linux reads refer to
+the same opened inode. Other platforms retain the full-validation fallback.
+
+For a full ISA, range checks and the relation `SA[ISA[p]] == p` establish a
+bijection between positions and ranks, replacing the redundant permutation
+bitmap. Consistency checks use deterministic parallel chunks and report the
+smallest failing position. The no-ISA compatibility path retains permutation
+validation. Fast prefix-directory reconstruction receives the loading thread
+budget and preserves the directory layout. Byte-coded LCP stays compressed.
+
+Reference matching uses read-only sequence views instead of constructing another
+owning `GenomeReference`. Metadata, ambiguity and reference fingerprint checks
+remain active. Loading statistics and callbacks report section phases, logical
+bytes, CRC CPU time and elapsed load time. RaMA-G logs Sufkit load and reference
+validation separately; nested measurements must not be added to their totals.
+
 Both query orientations are searched. MEMs are bilateral maximal exact matches;
 MAMs additionally require reference uniqueness. Strict MUMs require uniqueness in
 the reference collection and current query orientation/record. Generalized SMEMs
@@ -154,3 +174,10 @@ is used on the server to avoid the previously observed startup/ASLR issue; this
 does not imply sanitizer coverage of an uninstrumented third-party binary.
 Public release builds remain supported without internal tests or planning files.
 Runtime performance and biological accuracy require separately frozen evidence.
+
+The pending 0.1.1 version is defined by CMake `PROJECT_VERSION`; it supplies
+`RAMAG_VERSION` for CLI/SAM identification and the installed package version.
+Version preparation changes only that definition and documentation. Historical
+Release/Werror and sanitizer results cover the previously accepted loading
+implementation, not a fresh execution of the pending version. See the
+[changelog](../CHANGELOG.md) for the release boundary.

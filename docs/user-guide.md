@@ -7,6 +7,9 @@ target coordinate system; the query is aligned in both orientations. It is not a
 short-read mapper. Linux x86-64, a C++20 compiler, CMake 3.22+, Git, zlib and C/C++
 OpenMP are the production build requirements.
 
+These instructions cover the pending 0.1.1 source version. Run the following
+commands from the source root, using a fresh build directory after upgrading:
+
 ```bash
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
   -DRAMAG_WARNINGS_AS_ERRORS=ON
@@ -15,6 +18,17 @@ cmake --build build-release -j 8
 ./build-release/ramag --help
 ctest --test-dir build-release --output-on-failure
 ```
+
+The project version supplies the CLI version, SAM `@PG VN` and installed CMake
+package version. To install the program and library under a local prefix:
+
+```bash
+cmake --install build-release --prefix "$PWD/install"
+./install/bin/ramag --version
+```
+
+Examples below use `ramag`; use the executable's full path or add its installed
+`bin` directory to your `PATH`. See the [changelog](../CHANGELOG.md) for changes.
 
 Internal checkouts contain tests; public release trees need not. CTest verifies
 only tests available in the selected checkout. Absence of tests does not prevent
@@ -102,6 +116,15 @@ RaMA-G also compares stored contig metadata and Sufkit's reference fingerprint
 with the supplied normalized reference. SHA-256 is no longer calculated; CRC and
 the existing Sufkit fingerprint checks remain. A mismatch fails without rebuild.
 
+`--threads` also supplies the index-loading worker budget for SA/ISA consistency
+validation and Fast prefix-directory construction. On Linux, the requested
+budget must fit the calling thread's allowed CPU set; check your scheduler or
+`taskset` allocation if loading reports insufficient allowed CPUs. Not every
+loading phase is parallel, and this option does not promise linear speedup.
+CRC is accumulated while sections are read, and the normalized reference is
+checked through read-only views. Full validation is retained. Upgrading to 0.1.1
+does not require rebuilding compatible old raw- or byte-coded-LCP indexes.
+
 `--save` and `--reference-index` are mutually exclusive. Saving uses the same
 in-memory object, then self-validates and atomically publishes it. An index that
 was successfully saved is retained if later alignment fails. Without `--save`,
@@ -129,8 +152,8 @@ maximality/reference-uniqueness verification.
 `one-to-one` uses the current pairwise reference-side and query-side DP selection
 and retains their intersection. It does not use the former reciprocal elementary
 interval selector and does not claim equivalence to MUMmer4 `delta-filter -1`.
-The internal residual recovery and guarded gap-fill build settings remain as
-before this input/logging migration; neither is silently enabled by this change.
+The residual recovery and guarded gap-fill build settings retain their existing
+defaults in 0.1.1. The index-loading update changes neither selection nor scoring.
 
 ## Alignment options
 
@@ -176,6 +199,12 @@ configuration, input counts, index action/encoding, stage timings, core statisti
 requested artifacts and final status/exit code. Logs are flushed on exit and
 retained after failure. Failure before a logger can be created is reported to
 stderr. There are no SHA-256 digests, runtime manifests or completion markers.
+
+For reused indexes, logs include `index_action=loaded`, the requested loading
+thread budget, LCP encoding, logical read bytes and CRC CPU time. Timing summaries
+separate the Sufkit load, reference validation and detailed loading phases.
+CRC computation is included in section-read times; do not add it again to the
+load total or interpret CPU seconds as elapsed wall time.
 
 `--progress auto` shows terminal progress only when stderr is a TTY. `on` forces
 periodic progress; `off` suppresses it. The default interval is 10 seconds; an
@@ -238,7 +267,8 @@ Replace automation that waits for `.complete` or reads `.manifest.json` with
 process-exit checks, output parsing and `run.log` inspection. Index bundles become
 single files; old companion files can be left in place. Library consumers of
 removed manifest/SHA-256/SeqPro headers must migrate to `RunStatistics`, `ReadFasta`
-or the existing pairwise interfaces. No version-number change is made here.
+or the existing pairwise interfaces. These input/logging migration changes
+precede 0.1.1; they are not additional interface removals in this patch release.
 
 Current limitations include no automatic comparison/report pipeline, automatic
 index discovery, random-access gzip index, compressed output, BAM/CRAM, VCF,

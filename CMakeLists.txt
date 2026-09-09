@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(
   RaMA-G
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "Deterministic pairwise whole-genome alignment"
   LANGUAGES C CXX)
 

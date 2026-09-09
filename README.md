@@ -13,6 +13,7 @@ query multi-FASTA using a complete Sufkit suffix array and a KSW2 pairwise core.
 
 See the [user guide](docs/user-guide.md) for commands and input/output contracts,
 and the [developer guide](docs/developer-guide.md) for the algorithms and library.
+See the [changelog](CHANGELOG.md) for the pending 0.1.1 release and compatibility notes.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
