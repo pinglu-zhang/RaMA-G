@@ -9,6 +9,8 @@ query multi-FASTA using a complete Sufkit suffix array and a KSW2 pairwise core.
 - `all` or pairwise bilateral `one-to-one` selection.
 - SAM, PAF, delta, pairwise MAF and UCSC chain from the same final records.
 - Optional persistent compressed-LCP reference index, progress and signal handling.
+- Batch queries from repeated `--query` options or a named seqfile, sharing one
+  reference/index initialization and processing queries serially.
 - Thread-safe console/file logging using spdlog.
 
 See the [user guide](docs/user-guide.md) for commands and input/output contracts,
@@ -27,6 +29,19 @@ Each CLI run writes `work/runs/<run-id>/run.log`. Alignment and index commands d
 not generate JSON manifests, SHA-256 digests or completion marker files.
 Ordinary alignment builds its reference index in memory; use `--save PATH` to
 persist it, or `--reference-index PATH` to reuse an existing index.
+
+For several query assemblies against the same reference:
+
+```bash
+./build/ramag batch --reference reference.fa --reference-index reference.sufidx \
+  --query query1.fa.gz --query query2.fa.gz --output-dir results --threads 8
+```
+
+Alternatively use `--seqfile queries.txt` with one `name FASTA_path` per line.
+The seqfile is plain text; its filename extension is not significant.
+Batch defaults to PAF, records outcomes in `results/batch.tsv`, and continues
+after ordinary query failures. Its index stays resident between queries; peak
+memory can exceed a standalone alignment. See the [batch guide](docs/user-guide.md#batch-queries).
 
 Sufkit is fetched at an exact commit during configuration. KSW2, kseq and spdlog
 are vendored. The `cmake/` directory is required source, not a build artifact.

@@ -61,7 +61,19 @@ struct IndexSpec {
   ProgressOptions progress{};
 };
 
-enum class CommandKind : std::uint8_t { Align, Index };
+struct BatchQuery {
+  std::string name;
+  std::filesystem::path path;
+};
+
+struct BatchSpec {
+  RunSpec common;
+  std::filesystem::path output_dir;
+  std::filesystem::path seqfile;
+  std::vector<BatchQuery> queries;
+};
+
+enum class CommandKind : std::uint8_t { Align, Index, Batch };
 
 struct OpenMpRuntimeInfo {
   bool enabled{false};
@@ -86,6 +98,7 @@ struct CliParseResult {
   CommandKind command{CommandKind::Align};
   RunSpec run_spec;
   IndexSpec index_spec;
+  BatchSpec batch_spec;
   bool show_help{false};
   bool show_version{false};
   bool print_effective_config{false};
@@ -115,5 +128,8 @@ void ConfigureIndexRuntime(const IndexSpec& spec,
                            const CpuAffinityInfo& launch_affinity);
 void ValidateRunSpec(const RunSpec& spec);
 void ValidateIndexSpec(const IndexSpec& spec, bool require_suffix = true);
+void ValidateBatchSpec(const BatchSpec& spec);
+[[nodiscard]] RunSpec BatchQuerySpec(const BatchSpec& spec, const BatchQuery& query);
+[[nodiscard]] std::string EffectiveBatchConfigText(const BatchSpec& spec);
 
 }  // namespace ramag

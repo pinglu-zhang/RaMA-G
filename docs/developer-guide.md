@@ -92,6 +92,37 @@ verification. `mum` and `smem` use whole-query-record serial enumeration.
 Task results merge in deterministic order before final sorting/deduplication.
 Small independent oracles remain internal tests, not production fallback routes.
 
+## Batch ownership and execution
+
+`BatchSpec` contains shared alignment settings and ordered named query paths.
+The parser accepts either repeated query paths or a name/path seqfile and
+preflights shared settings, names and planned output collisions. Individual
+query readability and content failures are handled by the execution loop.
+
+`RunBatchPipeline` owns one `FastaData` reference and one `SufkitSeedIndex`.
+`RunAlignmentPipeline` and batch use the same internal execution function,
+which accepts an optional borrowed reference/index. Standalone alignment owns
+and releases its index after seeding; batch borrows the persistent shared object
+and releases each query's input, seeds and core result before advancing.
+Initialization callbacks use no dangling per-query captures. No global mutable
+index cache or duplicate pairwise implementation is introduced.
+
+`BatchOutcome` owns lightweight per-query outcomes and shared Build/Load call
+counts, not full records. CLI callers receive query logs and a flushed TSV
+status table. Library callers opt into a logger and retain their own affinity
+and signal policies; no new installed library target is added. Query execution
+is serial, with internal stage parallelism confined to the shared thread budget.
+
+The TSV is claimed exclusively. Normal outcomes are appended in input order;
+fatal initialization or interruption appends remaining not-run rows. It is not
+a checkpoint or a transaction marker. Each query uses the existing independent
+writer transaction. Shared initialization/allocation failures terminate the
+batch, while ordinary query exceptions leave the shared index intact and permit
+the next query. A saved reference index has its own publication lifetime.
+Logs report shared initialization once and index reuse per query. Retaining the
+index during pairwise processing intentionally differs from standalone memory
+lifetimes; no memory or throughput improvement is asserted without measurement.
+
 ## Pairwise algorithm and memory
 
 The core groups and filters anchors by reference/query contig and direction,

@@ -8,6 +8,8 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <fstream>
+#include <set>
 #include <sstream>
 #include <system_error>
 
@@ -445,10 +447,12 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
     return parsed;
   }
 
-  if (first != "align") {
-    throw CliError("expected subcommand 'align' or 'index'; got: " + std::string(first));
+  const bool batch = first == "batch";
+  if (first != "align" && !batch) {
+    throw CliError("expected subcommand 'align', 'index' or 'batch'; got: " + std::string(first));
   }
-  parsed.command = CommandKind::Align;
+  parsed.command = batch ? CommandKind::Batch : CommandKind::Align;
+  if (batch) parsed.run_spec.formats = {false, true, false, false, false};
   bool have_reference = false;
   bool have_query = false;
   bool have_prefix = false;
@@ -471,12 +475,26 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
       if (parsed.run_spec.save_index_path.empty()) throw CliError("--save requires an index file path");
     } else if (option == "--query") {
       parsed.run_spec.query_path = RequireValue(argc, argv, index, option);
+      if (batch) {
+        auto stem = parsed.run_spec.query_path.filename();
+        if (stem.extension() == ".gz") stem = stem.stem();
+        if (stem.extension() == ".fa" || stem.extension() == ".fna" || stem.extension() == ".fasta") stem = stem.stem();
+        parsed.batch_spec.queries.push_back({stem.string(), parsed.run_spec.query_path});
+      }
       have_query = true;
+    } else if (batch && option == "--seqfile") {
+      if (!parsed.batch_spec.seqfile.empty()) throw CliError("--seqfile may appear only once");
+      parsed.batch_spec.seqfile = RequireValue(argc, argv, index, option);
+    } else if (batch && option == "--output-dir") {
+      if (!parsed.batch_spec.output_dir.empty()) throw CliError("--output-dir may appear only once");
+      parsed.batch_spec.output_dir = RequireValue(argc, argv, index, option);
     } else if (option == "--output-prefix") {
+      if (batch) throw CliError("batch uses --output-dir, not --output-prefix");
       if (!parsed.run_spec.outputs.empty()) throw CliError("--output-prefix cannot be combined with --output");
       parsed.run_spec.output_prefix = RequireValue(argc, argv, index, option);
       have_prefix = true;
     } else if (option == "--output") {
+      if (batch) throw CliError("batch uses --output-dir and --formats, not --output");
       if (have_prefix || have_formats) throw CliError("--output cannot be combined with --output-prefix or --formats");
       AddExplicitOutput(parsed.run_spec, RequireValue(argc, argv, index, option));
     } else if (option == "--work-dir") {
@@ -518,6 +536,37 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
   }
   if (parsed.show_help || parsed.show_version) return parsed;
   if (!have_reference) throw CliError("missing required option --reference");
+  if (have_smem_min_occurrences && parsed.run_spec.alignment.seed_mode != SeedMode::Smem) {
+    throw CliError("--smem-min-occurrences requires --seed-mode smem");
+  }
+  if (batch) {
+    auto& spec = parsed.batch_spec;
+    if (!spec.seqfile.empty()) {
+      if (have_query) throw CliError("--query and --seqfile are mutually exclusive");
+      std::ifstream input(spec.seqfile);
+      if (!input) throw CliError("cannot read seqfile: " + spec.seqfile.string());
+      std::string line;
+      std::size_t line_number = 0;
+      while (std::getline(input, line)) {
+        ++line_number;
+        const auto begin = line.find_first_not_of(" \t\r");
+        if (begin == std::string::npos || line[begin] == '#') continue;
+        const auto split = line.find_first_of(" \t", begin);
+        const auto path_begin = split == std::string::npos ? split : line.find_first_not_of(" \t", split);
+        if (path_begin == std::string::npos || path_begin > line.find_last_not_of(" \t\r"))
+          throw CliError("seqfile requires name and FASTA path at line " + std::to_string(line_number));
+        std::filesystem::path path(line.substr(path_begin, line.find_last_not_of(" \t\r") - path_begin + 1));
+        if (path.is_relative()) path = spec.seqfile.parent_path() / path;
+        spec.queries.push_back({line.substr(begin, split - begin), path.lexically_normal()});
+      }
+      if (input.bad()) throw CliError("error reading seqfile");
+    }
+    if (!have_work_dir) parsed.run_spec.work_dir = spec.output_dir / ".ramag-work";
+    parsed.run_spec.query_path.clear();
+    spec.common = parsed.run_spec;
+    ValidateBatchSpec(spec);
+    return parsed;
+  }
   if (!have_query) throw CliError("missing required option --query");
   if (!have_prefix && parsed.run_spec.outputs.empty()) {
     throw CliError("missing required option --output-prefix or --output");
@@ -598,6 +647,90 @@ void ValidateIndexSpec(const IndexSpec& spec, bool require_suffix) {
   ValidateProgress(spec.progress);
 }
 
+RunSpec BatchQuerySpec(const BatchSpec& spec, const BatchQuery& query) {
+  auto run = spec.common;
+  run.query_path = query.path;
+  run.save_index_path.clear();
+  run.output_prefix = spec.output_dir / query.name / "alignment";
+  run.work_dir = spec.common.work_dir / "queries" / query.name;
+  run.outputs.clear();
+  return run;
+}
+
+void ValidateBatchSpec(const BatchSpec& spec) {
+  if (spec.output_dir.empty()) throw CliError("batch requires --output-dir");
+  if (spec.queries.empty()) throw CliError("batch requires at least one query");
+  if (!spec.common.outputs.empty() || !spec.common.output_prefix.empty()) throw CliError("batch output paths are generated from --output-dir");
+  std::set<std::string> names;
+  std::vector<std::filesystem::path> targets{spec.output_dir / "batch.tsv"};
+  const auto ancestor = [](const std::filesystem::path& a, const std::filesystem::path& b) {
+    auto i = a.begin(); auto j = b.begin();
+    for (; i != a.end() && j != b.end() && *i == *j; ++i, ++j) {}
+    return i == a.end();
+  };
+  for (const auto& query : spec.queries) {
+    const auto& name = query.name;
+    if (name.empty() || name == "." || name == ".." || name == ".ramag-work" || name == "batch.tsv" ||
+        name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string::npos)
+      throw CliError("invalid or reserved batch query name: " + name);
+    if (!names.insert(name).second) throw CliError("duplicate batch query name: " + name + "; use --seqfile with unique names");
+    if (query.path.empty()) throw CliError("empty batch query path");
+    auto run = BatchQuerySpec(spec, query);
+    // Validate shared settings without opening an individual query: missing or
+    // malformed query input belongs to that item's result, not batch startup.
+    run.query_path = spec.common.reference_path;
+    run.save_index_path = spec.common.save_index_path;
+    ValidateRunSpec(run);
+    if (spec.common.formats.delta && query.path.string().find_first_of(" \t\n\r") != std::string::npos)
+      throw CliError("delta format cannot encode whitespace in batch query paths");
+    const auto prefix = run.output_prefix.string();
+    if (run.formats.sam) targets.emplace_back(prefix + ".sam");
+    if (run.formats.paf) targets.emplace_back(prefix + ".paf");
+    if (run.formats.delta) targets.emplace_back(prefix + ".delta");
+    if (run.formats.maf) targets.emplace_back(prefix + ".maf");
+    if (run.formats.chain) targets.emplace_back(prefix + ".chain");
+  }
+  if (!spec.common.save_index_path.empty()) targets.push_back(spec.common.save_index_path);
+  std::set<std::filesystem::path> unique;
+  std::vector<std::filesystem::path> inputs{spec.common.reference_path};
+  if (!spec.common.reference_index_path.empty()) inputs.push_back(spec.common.reference_index_path);
+  if (!spec.seqfile.empty()) inputs.push_back(spec.seqfile);
+  for (const auto& query : spec.queries) inputs.push_back(query.path);
+  for (const auto& target : targets) {
+    ValidateOutputParent(target);
+    if (std::filesystem::symlink_status(target).type() != std::filesystem::file_type::not_found)
+      throw CliError("batch output already exists: " + target.string());
+    const auto normalized = std::filesystem::weakly_canonical(std::filesystem::absolute(target));
+    for (const auto& previous : unique)
+      if (ancestor(previous, normalized) || ancestor(normalized, previous)) throw CliError("batch output paths conflict");
+    unique.insert(normalized);
+    for (const auto& input : inputs) {
+      const auto in = std::filesystem::weakly_canonical(std::filesystem::absolute(input));
+      if (ancestor(normalized, in) || ancestor(in, normalized)) throw CliError("batch output conflicts with input: " + target.string());
+    }
+    const auto work = std::filesystem::weakly_canonical(std::filesystem::absolute(spec.common.work_dir));
+    if (ancestor(normalized, work) || ancestor(work, normalized)) throw CliError("batch output conflicts with work directory");
+  }
+}
+
+std::string EffectiveBatchConfigText(const BatchSpec& spec) {
+  auto run = BatchQuerySpec(spec, spec.queries.front());
+  run.save_index_path = spec.common.save_index_path;
+  std::string common = EffectiveConfigText(run);
+  const auto command = common.find("command=align\n");
+  if (command != std::string::npos) common.replace(command, 14, "command=batch\n");
+  std::ostringstream out;
+  out << common << "batch_output_dir=" << AbsoluteForDisplay(spec.output_dir)
+      << "\nbatch_query_count=" << spec.queries.size() << "\nbatch_query_execution=serial\nbatch_failure_policy=continue\n";
+  for (std::size_t i = 0; i < spec.queries.size(); ++i) {
+    const auto& q = spec.queries[i];
+    out << "batch_query." << i + 1 << ".name=" << q.name << '\n'
+        << "batch_query." << i + 1 << ".path=" << AbsoluteForDisplay(q.path) << '\n'
+        << "batch_query." << i + 1 << ".output_prefix=" << AbsoluteForDisplay(BatchQuerySpec(spec, q).output_prefix) << '\n';
+  }
+  return out.str();
+}
+
 std::string HelpText() {
   return R"(RaMA-G pairwise whole-genome aligner
 
@@ -608,6 +741,19 @@ Usage:
               --output RESULT.paf [--output RESULT.maf ...] --work-dir DIR
   ramag index --reference REF.fa[.gz] --output REF.sufidx
               --work-dir DIR [--threads N]
+  ramag batch --reference REF.fa[.gz] [--reference-index REF.sufidx]
+              --query QUERY.fa[.gz] [--query OTHER.fa[.gz] ...]
+              --output-dir DIR [--threads N]
+  ramag batch --reference REF.fa[.gz] --seqfile queries.txt --output-dir DIR
+
+Batch options:
+  --query PATH              Repeatable; mutually exclusive with --seqfile
+  --seqfile PATH            Query name and FASTA path per line; relative to seqfile
+  --output-dir PATH         Per-query NAME/alignment outputs and batch.tsv
+  --work-dir PATH           Optional (default: OUTPUT_DIR/.ramag-work)
+  --formats LIST            sam,paf,delta,maf,chain (batch default: paf)
+  Shared alignment options below also apply. Queries run serially, reusing one
+  resident index. Query failures are recorded and later queries continue.
 
 Alignment I/O:
   --reference PATH          Reference FASTA or gzip FASTA

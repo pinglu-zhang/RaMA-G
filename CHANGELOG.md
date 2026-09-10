@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased changes
+
+- Add `ramag batch` with repeated query paths or a named seqfile, one shared
+  reference/index initialization, serial queries, PAF by default and per-query
+  transactional output. Ordinary query failures do not prevent later queries;
+  `batch.tsv` records terminal outcomes and the overall exit code is nonzero
+  when any query fails. The resident index may increase pairwise-stage memory.
+- Add batch effective configuration, query-aware progress and separate shared
+  initialization timing. No batch performance claim or version bump is included.
+
 ## 0.1.1 — Unreleased
 
 ### Index loading

@@ -132,6 +132,23 @@ int main(int argc, char** argv) {
       logger->Flush();
       return 0;
     }
+    if (parsed.command == ramag::CommandKind::Batch) {
+      const auto& batch = parsed.batch_spec;
+      const ramag::IndexSpec runtime{batch.common.reference_path, {}, batch.common.work_dir,
+                                    batch.common.threads, batch.common.progress};
+      ramag::ConfigureIndexRuntime(runtime, LaunchCpuAffinity());
+      if (parsed.print_effective_config) {
+        std::cout << ramag::EffectiveBatchConfigText(batch);
+        return 0;
+      }
+      logger = std::make_unique<ramag::RunLogger>(batch.common.work_dir);
+      logger->Info(ramag::VersionText(), false);
+      logger->Info(ramag::EffectiveBatchConfigText(batch), false);
+      logger->Info("invocation=" + Invocation(argc, argv), false);
+      const auto outcome = ramag::RunBatchPipeline(batch, Invocation(argc, argv), binary_path, logger.get());
+      logger->Flush();
+      return outcome.exit_code;
+    }
     ramag::ConfigureOpenMpRuntime(parsed.run_spec);
 #if defined(__linux__)
     // Restore only the executable's pre-libgomp authorized CPU mask. The

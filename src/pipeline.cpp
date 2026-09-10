@@ -13,12 +13,15 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
+#include <cerrno>
 #include <ctime>
 #include <exception>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <new>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string_view>
@@ -354,9 +357,12 @@ void VerifyPublishedArtifact(const ArtifactReport& artifact) {
 
 }  // namespace
 
-RunOutcome RunAlignmentPipeline(const RunSpec& spec,
+static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
                                 std::string invocation,
-                                std::filesystem::path binary_path, RunLogger* logger) {
+                                std::filesystem::path binary_path, RunLogger* logger,
+                                const FastaData* shared_reference,
+                                const SufkitSeedIndex* shared_index,
+                                std::string batch_label = {}) {
   ValidateRunSpec(spec);
   if (!spec.save_index_path.empty() && !SufkitAdapterAvailable()) {
     throw DependencyError("--save requires the pinned Sufkit production adapter");
@@ -369,7 +375,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
   std::filesystem::path retained_index;
   EnsureDirectory(spec.work_dir, "work directory");
   EnsureDirectory(run_directory, "run diagnostic directory");
-  ProgressSession progress(spec.progress, run_id, spec.threads, logger);
+  ProgressSession progress(spec.progress, run_id + batch_label, spec.threads, logger);
 
   try {
     progress.Stage("configuration");
@@ -379,26 +385,33 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     stage = "input";
     progress.Stage(stage);
     const auto input_begin = Clock::now();
-    FastaData reference;
+    FastaData owned_reference;
+    const FastaData& reference = shared_reference ? *shared_reference : owned_reference;
     FastaData query;
     std::string input_route;
     std::string input_parallel_route = "serial-reference-query-v1";
     std::uint32_t input_requested_workers = 1;
     std::uint32_t input_actual_workers = 1;
     std::map<std::string, std::string> adapter_provenance;
-    const auto reference_compression =
+    const auto reference_compression = shared_reference ? FastaCompression::Plain :
         DetectFastaCompression(spec.reference_path);
     const auto query_compression = DetectFastaCompression(spec.query_path);
     adapter_provenance["input.reference.compression"] =
-        reference_compression == FastaCompression::Gzip ? "gzip" : "plain";
+        shared_reference ? "shared-normalized-reference" :
+        (reference_compression == FastaCompression::Gzip ? "gzip" : "plain");
     adapter_provenance["input.query.compression"] =
         query_compression == FastaCompression::Gzip ? "gzip" : "plain";
-    auto inputs = ReadFastaInputs(spec);
-    input_requested_workers = inputs.requested_workers;
-    input_actual_workers = inputs.actual_workers;
-    input_parallel_route = std::move(inputs.route);
-    reference = std::move(inputs.results[0]);
-    query = std::move(inputs.results[1]);
+    if (shared_reference) {
+      query = ReadFasta(spec.query_path);
+      input_parallel_route = "shared-reference-serial-query";
+    } else {
+      auto inputs = ReadFastaInputs(spec);
+      input_requested_workers = inputs.requested_workers;
+      input_actual_workers = inputs.actual_workers;
+      input_parallel_route = std::move(inputs.route);
+      owned_reference = std::move(inputs.results[0]);
+      query = std::move(inputs.results[1]);
+    }
     input_route = "kseq-zlib-strict-fasta";
     if (logger) logger->Info("input reference_bases=" + std::to_string(reference.total_bases) +
         " query_bases=" + std::to_string(query.total_bases) + " actual_workers=" + std::to_string(input_actual_workers));
@@ -455,7 +468,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
       {
       const auto index_begin = Clock::now();
       const bool load_persistent_index = !spec.reference_index_path.empty();
-      stage = load_persistent_index ? "index-load" : "index-build";
+      stage = shared_index ? "index-reuse" : (load_persistent_index ? "index-load" : "index-build");
       progress.Stage(stage, 0, 0,
                      load_persistent_index ? spec.reference_index_path.string()
                                            : "ephemeral");
@@ -471,7 +484,8 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
           progress.Stage("index-load:" + last_load_stage);
         }
       };
-      auto index = [&]() {
+      std::optional<SufkitSeedIndex> owned_index;
+      if (!shared_index) owned_index.emplace([&]() {
         if (load_persistent_index) {
           return SufkitSeedIndex::Load(
               spec.reference_index_path, reference.sequences,
@@ -483,12 +497,13 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
         adapter_provenance["sufkit.index.pre_build_cpu_count"] = std::to_string(build_affinity.logical_cpus.size());
         return SufkitSeedIndex::Build(
             reference.sequences, core_index_options);
-      }();
+      }());
+      const auto& index = shared_index ? *shared_index : *owned_index;
       const double index_seconds = SecondsBetween(index_begin, Clock::now());
-      timings[load_persistent_index ? "index_load" : "index_build"] =
+      timings[shared_index ? "index_reuse" : (load_persistent_index ? "index_load" : "index_build")] =
           index_seconds;
       adapter_provenance["sufkit.index.save_path"] = spec.save_index_path.string();
-      if (load_persistent_index) {
+      if (load_persistent_index && !shared_index) {
         const auto& loaded = index.BuildStatistics();
         for (const auto& [phase, seconds] : loaded.load_stage_seconds)
           timings["index_load_" + phase] = seconds;
@@ -500,7 +515,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
             " crc_cpu_seconds=" + std::to_string(loaded.load_crc_seconds), false);
       }
       adapter_provenance["sufkit.index.persisted"] = "false";
-      if (!spec.save_index_path.empty()) {
+      if (!spec.save_index_path.empty() && !shared_index) {
         stage = "index-save";
         IndexSpec save_spec{spec.reference_path, spec.save_index_path,
                             spec.work_dir, spec.threads, spec.progress};
@@ -510,7 +525,8 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
         adapter_provenance["sufkit.index.persisted"] = "true";
       }
       adapter_provenance["sufkit.index.action"] =
-          load_persistent_index ? "loaded" : "built";
+          shared_index ? "reused" : (load_persistent_index ? "loaded" : "built");
+      if (shared_index && logger) logger->Info("index_action=reused index_load_calls=0 index_build_calls=0", false);
       adapter_provenance["sufkit.index.loaded_with_commit"] =
           std::string(kRequiredSufkitCommit);
       adapter_provenance["sufkit.index.path"] =
@@ -518,6 +534,7 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
               ? AbsolutePathString(spec.reference_index_path)
               : (spec.save_index_path.empty() ? "ephemeral" : AbsolutePathString(spec.save_index_path));
       adapter_provenance["sufkit.index.reference_validation"] =
+          shared_index ? "validated-once-at-batch-initialization" :
           load_persistent_index ? "sufkit-crc+structure+metadata+fingerprint"
                                 : "built-from-current-reference";
       stage = "seed-enumeration";
@@ -710,7 +727,8 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
                     ":acceleration=" + index_stats.acceleration;
       seeding_route = seed_result.statistics.actual_route;
       }
-      observe_index("index-released", 0);
+      observe_index(shared_index ? "index-retained-for-batch" : "index-released",
+                    shared_index ? shared_index->BuildStatistics().resident_core_bytes : 0);
       result = AlignPairwiseFromSeeds(
           reference.sequences, query.sequences, alignment_options,
           std::move(seed_result.seeds), std::move(seed_statistics));
@@ -1010,6 +1028,151 @@ RunOutcome RunAlignmentPipeline(const RunSpec& spec,
     try { if (logger) logger->Error("status=" + std::string(dynamic_cast<const InterruptedError*>(&error) ? "interrupted" : "failed") + " exit_code=" + std::to_string(FailureExitCode(error)) + " stage=" + stage + " retained_reference_index=" + retained_index.string() + " message=" + error.what()); } catch (...) {}
     throw;
   }
+}
+
+RunOutcome RunAlignmentPipeline(const RunSpec& spec, std::string invocation,
+    std::filesystem::path binary_path, RunLogger* logger) {
+  return RunAlignmentPipelineImpl(spec, std::move(invocation),
+      std::move(binary_path), logger, nullptr, nullptr);
+}
+
+BatchOutcome RunBatchPipeline(const BatchSpec& spec, std::string invocation,
+    std::filesystem::path binary_path, RunLogger* logger) {
+  ValidateBatchSpec(spec);
+  if (!SufkitAdapterAvailable()) throw DependencyError("batch requires the pinned Sufkit adapter");
+  EnsureDirectory(spec.output_dir, "batch output directory");
+  // Exclusive creation prevents concurrent batches from claiming the same table.
+  std::unique_ptr<std::FILE, decltype(&std::fclose)> table(
+      std::fopen((spec.output_dir / "batch.tsv").c_str(), "wx"), &std::fclose);
+  if (!table) throw WriterError("cannot exclusively create batch.tsv");
+  const auto write = [&](const std::string& text) {
+    if (std::fwrite(text.data(), 1, text.size(), table.get()) != text.size() ||
+        std::fflush(table.get()) != 0) throw WriterError("cannot reliably write batch.tsv");
+  };
+  const auto escape = [](std::string_view text) {
+    std::string result;
+    for (const char c : text) {
+      if (c == '\\') result += "\\\\";
+      else if (c == '\t') result += "\\t";
+      else if (c == '\n') result += "\\n";
+      else if (c == '\r') result += "\\r";
+      else result += c;
+    }
+    return result;
+  };
+  write("order\tname\tquery_path\tstatus\texit_code\telapsed_seconds\talignment_records\toutput_dir\tlog_path\tmessage\n");
+  BatchOutcome outcome;
+  for (const auto& query : spec.queries) {
+    BatchQueryOutcome entry;
+    entry.name = query.name;
+    outcome.queries.push_back(std::move(entry));
+  }
+  std::size_t recorded = 0;
+  const auto record = [&](std::size_t i) {
+    const auto& item = outcome.queries[i];
+    std::ostringstream row;
+    row << i + 1 << '\t' << item.name << '\t' << escape(spec.queries[i].path.string())
+        << '\t' << item.status << '\t';
+    if (item.status != "not-run") row << item.exit_code;
+    row << '\t' << item.elapsed_seconds << '\t' << item.alignment_count << '\t'
+        << escape((spec.output_dir / item.name).string()) << '\t'
+        << escape(item.log_path.string()) << '\t' << escape(item.message) << '\n';
+    write(row.str());
+  };
+  const auto batch_begin = Clock::now();
+  try {
+    FastaData reference;
+    std::optional<SufkitSeedIndex> index;
+    {
+      ProgressSession progress(spec.common.progress, logger ? logger->Id() : MakeNonce(), spec.common.threads, logger);
+      progress.Stage("batch-reference-input", 0, spec.queries.size());
+      const auto begin = Clock::now();
+      reference = ReadFasta(spec.common.reference_path);
+      if (logger) logger->Info("batch shared_reference_input_seconds=" + std::to_string(SecondsBetween(begin, Clock::now())));
+      const auto index_begin = Clock::now();
+      SufkitIndexOptions options{spec.common.threads};
+      options.mam_worker_cap = spec.common.threads;
+      options.mam_workspace_limit_bytes = UINT64_MAX;
+      options.boundary_mem_occurrence_limit = UINT64_MAX;
+      // Captures outlive the index, including any callbacks retained by adapter.
+      options.load_stage_callback = [](std::string_view phase) { CheckInterruption(phase); };
+      if (spec.common.reference_index_path.empty()) {
+        progress.Stage("batch-index-build");
+        ValidateCpuAffinityBudget(CurrentCpuAffinity(), spec.common.threads, "batch index build");
+        ++outcome.index_build_calls;
+        index.emplace(SufkitSeedIndex::Build(reference.sequences, options));
+      } else {
+        progress.Stage("batch-index-load");
+        ++outcome.index_load_calls;
+        index.emplace(SufkitSeedIndex::Load(spec.common.reference_index_path, reference.sequences, options));
+      }
+      const auto seconds = SecondsBetween(index_begin, Clock::now());
+      if (logger) {
+        const auto stats = index->BuildStatistics();
+        logger->Info("batch index_action=" + std::string(outcome.index_load_calls ? "loaded" : "built") +
+            " index_load_calls=" + std::to_string(outcome.index_load_calls) +
+            " index_build_calls=" + std::to_string(outcome.index_build_calls) +
+            " shared_index_seconds=" + std::to_string(seconds) + " lcp_encoding=" + stats.lcp_encoding);
+        for (const auto& [phase, value] : stats.load_stage_seconds)
+          logger->Info("batch timing stage=" + phase + " seconds=" + std::to_string(value), false);
+        logger->Info("batch index retained across pairwise stages; estimated_resident_bytes=" + std::to_string(stats.resident_core_bytes), false);
+        logger->Info("batch timing stage=reference-validation seconds=" + std::to_string(stats.reference_validation_seconds) +
+            " sufkit_load_seconds=" + std::to_string(stats.sufkit_load_seconds), false);
+      }
+      if (!spec.common.save_index_path.empty()) {
+        IndexSpec save{spec.common.reference_path, spec.common.save_index_path, spec.common.work_dir,
+                       spec.common.threads, spec.common.progress};
+        std::map<std::string, double> timings;
+        (void)SaveReferenceIndex(save, reference, *index, invocation, binary_path, progress, seconds, timings, logger);
+      }
+    }
+    for (std::size_t i = 0; i < spec.queries.size(); ++i) {
+      CheckInterruption("batch-query-boundary");
+      auto& item = outcome.queries[i];
+      const auto run = BatchQuerySpec(spec, spec.queries[i]);
+      const auto begin = Clock::now();
+      std::unique_ptr<RunLogger> child_logger;
+      try {
+        if (logger) {
+          logger->Info("batch query=" + item.name + " position=" + std::to_string(i + 1) + "/" + std::to_string(spec.queries.size()));
+          child_logger = std::make_unique<RunLogger>(run.work_dir);
+          item.log_path = child_logger->Path();
+          child_logger->Info("batch query=" + item.name + " invocation=" + invocation, false);
+        }
+        if (!std::filesystem::is_regular_file(run.query_path)) throw FastaError("query is not a readable regular file: " + run.query_path.string());
+        const auto result = RunAlignmentPipelineImpl(run, invocation, binary_path,
+            child_logger.get(), &reference, &*index,
+            ":query=" + item.name + ":" + std::to_string(i + 1) + "/" + std::to_string(spec.queries.size()));
+        item.alignment_count = result.statistics.alignment_count;
+        item.status = "success";
+      } catch (const std::exception& error) {
+        item.exit_code = FailureExitCode(error);
+        item.status = dynamic_cast<const InterruptedError*>(&error) ? "interrupted" : "failed";
+        item.message = error.what();
+        item.elapsed_seconds = SecondsBetween(begin, Clock::now());
+        record(i); ++recorded;
+        if (logger) logger->Error("batch query=" + item.name + " status=" + item.status + " message=" + item.message);
+        if (dynamic_cast<const InterruptedError*>(&error) || dynamic_cast<const std::bad_alloc*>(&error)) throw;
+        if (outcome.exit_code == 0) outcome.exit_code = item.exit_code;
+        continue;
+      }
+      item.elapsed_seconds = SecondsBetween(begin, Clock::now());
+      record(i); ++recorded;
+    }
+    if (logger) {
+      logger->Info("batch status=" + std::string(outcome.exit_code ? "failed" : "success") +
+          " exit_code=" + std::to_string(outcome.exit_code) + " total_seconds=" +
+          std::to_string(SecondsBetween(batch_begin, Clock::now())));
+      logger->Flush();
+    }
+  } catch (const std::exception& error) {
+    for (std::size_t i = recorded; i < outcome.queries.size(); ++i) {
+      outcome.queries[i].message = "batch stopped: " + std::string(error.what());
+      record(i);
+    }
+    throw;
+  }
+  return outcome;
 }
 
 }  // namespace ramag

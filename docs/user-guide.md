@@ -131,6 +131,100 @@ was successfully saved is retained if later alignment fails. Without `--save`,
 there is no persistent index Save or save/load self-validation. RaMA-G neither
 discovers indexes automatically nor silently converts loaded LCP encodings.
 
+## Batch queries
+
+`batch` reads one reference and initializes one shared Sufkit index, then processes
+query FASTAs in input order. Each query remains an independent alignment, including
+its FASTA record boundaries and strict-MUM uniqueness rules.
+
+```bash
+ramag batch --reference human.fa.gz --reference-index human.sufidx \
+  --query chimp.fa.gz --query gorilla.fa.gz --query orangutan.fa.gz \
+  --output-dir results --threads 32
+
+ramag batch --reference human.fa.gz --reference-index human.sufidx \
+  --seqfile queries.txt --output-dir named-results --threads 32
+```
+
+The seqfile is a plain-text file with one query name and FASTA path per line,
+separated by whitespace. `.txt` is the recommended suffix, but parsing does not
+depend on the filename suffix.
+
+An editable [seqfile example](../examples/batch/queries.txt) is included; replace
+its placeholder paths with your query FASTAs.
+
+```text
+# name      FASTA path
+chimp       data/chimp.fa.gz
+gorilla     data/gorilla.fa.gz
+orangutan   data/orangutan.fa.gz
+```
+
+Paths are relative to the seqfile directory, not the process working directory.
+The first whitespace separator ends the name; the remaining trimmed text is the
+path and may contain internal spaces. LF, CRLF, blank lines and whole-line `#`
+comments are supported. Shell variables, glob patterns and quoting are not
+expanded. This is a query list, not a Cactus tree/seqfile. The reference is supplied
+separately with `--reference`. `--seqfile` and repeated `--query` cannot be mixed.
+
+Names may use ASCII letters, digits, `.`, `_` and `-`, and must be unique. Empty
+names, `.`, `..`, `batch.tsv` and `.ramag-work` are rejected. With repeated
+`--query`, names come from the filename after stripping `.gz` and `.fa`, `.fna`
+or `.fasta`. If filenames collide or contain unsupported name characters, use
+unique explicit names in a seqfile. Missing/unreadable query files are individual
+failures; malformed seqfiles and duplicate names fail before index initialization.
+
+Each item writes `OUTPUT_DIR/NAME/alignment.paf` by default. `--formats` accepts
+the same five formats as `align`; seed, selection, scoring and thread defaults
+also match `align` (including `fast` and `all`). To select a different policy,
+pass `--seed-mode mumreference --selection-mode one-to-one` explicitly. Batch
+does not accept `--output` or `--output-prefix`. The output directory is required;
+the optional `--work-dir` defaults to `OUTPUT_DIR/.ramag-work`.
+
+Without `--reference-index`, batch builds one ephemeral byte-coded-LCP index.
+Use `--save PATH` to save that same object before processing queries; saving also
+performs the usual temporary-file Load self-validation. `--save` and
+`--reference-index` are mutually exclusive. A saved index survives later query
+failure. Compatible old raw/byte-coded indexes remain usable.
+
+Queries run serially, each using the requested thread budget. Only one query's
+sequence, seeds and alignment workspace are retained at a time, but the reference
+and index stay resident until batch ends. Standalone `align` releases its index
+after enumeration; batch can therefore have a higher pairwise-stage memory peak.
+There is no automatic query prefetch, parallel-query execution or resume.
+The existing bounded per-thread encoding/selection scratch caches may be reused;
+batch does not retain prior query records, seeds or alignment results.
+
+`OUTPUT_DIR/batch.tsv` is created exclusively and flushed after each terminal
+query outcome. Columns are `order`, `name`, `query_path`, `status`, `exit_code`,
+`elapsed_seconds`, `alignment_records`, `output_dir`, `log_path`, and `message`.
+Tabs, newlines, carriage returns and backslashes inside field values are escaped
+as `\t`, `\n`, `\r` and `\\`. Per-query elapsed time excludes shared initialization.
+It is a status table, not a completion marker; while a query runs its terminal
+row is absent. An abrupt process kill may leave only the completed rows.
+
+Statuses are `success`, `failed`, `interrupted` and `not-run`. Valid zero-hit
+outputs are successful with zero records. On early termination, remaining rows
+are appended as `not-run` with an empty exit-code field. All successful query
+outputs are preserved; handled failures roll back only the current item's files.
+Existing output files and an existing `batch.tsv` are never overwritten, and
+all planned output collisions are checked before initialization.
+
+The batch exits 0 only if all queries succeed. Ordinary failures are recorded
+and later queries continue; the final exit code is that of the first failed
+query in input order. Shared initialization errors, allocation failure or an
+unreliable batch status table stop the batch. SIGINT/SIGTERM stop scheduling,
+roll back the interrupted item and exit 130/143. SIGUSR1 requests a snapshot
+containing the current query name, position and processing phase.
+
+The batch log records shared reference input and index initialization separately
+from query execution. `index_load_calls` and `index_build_calls` count shared
+initialization calls, not the Load self-check used when saving. Each query logs
+`index_action=reused` with zero initialization calls. Per-query logs live below
+`WORK/queries/NAME/runs/RUN_ID/run.log`. A command with
+`--print-effective-config` prints the resolved list and paths without reading
+FASTA contents or initializing an index.
+
 ## Seed and selection modes
 
 | Mode | Meaning |
