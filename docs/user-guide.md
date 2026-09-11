@@ -194,6 +194,15 @@ after enumeration; batch can therefore have a higher pairwise-stage memory peak.
 There is no automatic query prefetch, parallel-query execution or resume.
 The existing bounded per-thread encoding/selection scratch caches may be reused;
 batch does not retain prior query records, seeds or alignment results.
+The reference is held by an immutable shared owner and checked once during
+index initialization. Later queries reuse that validated binding without
+rescanning or copying the reference. Query input is still validated independently.
+On glibc, batch returns freed allocator pages between queries. This does not
+discard live index pages or impose an RSS cap. The extra resident index during
+pairwise processing means that a strict standalone-align peak-memory bound is
+not guaranteed. No whole-batch thread pool or memory-admission scheduler is used;
+OpenMP parallelism remains within the current query. The experimental
+`--query-concurrency` and `--memory-budget` options are not supported.
 
 `OUTPUT_DIR/batch.tsv` is created exclusively and flushed after each terminal
 query outcome. Columns are `order`, `name`, `query_path`, `status`, `exit_code`,

@@ -1009,10 +1009,43 @@ void SufkitSeedIndex::Save(const std::filesystem::path& path) const {
 #endif
 }
 
+SufkitSeedIndex SufkitSeedIndex::BuildOwned(
+    std::shared_ptr<const std::vector<SequenceRecord>> references,
+    const SufkitIndexOptions& options) {
+    if (!references) throw AlignmentError("null owned reference");
+    auto result = Build(*references, options);
+    result.owned_reference_ = std::move(references);
+    return result;
+}
+
+SufkitSeedIndex SufkitSeedIndex::LoadOwned(
+    const std::filesystem::path& path,
+    std::shared_ptr<const std::vector<SequenceRecord>> references,
+    const SufkitIndexOptions& options) {
+    if (!references) throw AlignmentError("null owned reference");
+    auto result = Load(path, *references, options);
+    result.owned_reference_ = std::move(references);
+    return result;
+}
+
+SufkitSeedResult SufkitSeedIndex::EnumerateOwned(
+    const std::vector<SequenceRecord>& queries,
+    const AlignmentOptions& options) const {
+    if (!owned_reference_) throw AlignmentError("index has no owned reference");
+    return EnumerateImpl(*owned_reference_, queries, options, true);
+}
+
 SufkitSeedResult SufkitSeedIndex::Enumerate(
     const std::vector<SequenceRecord>& references,
     const std::vector<SequenceRecord>& queries,
     const AlignmentOptions& options) const {
+    return EnumerateImpl(references, queries, options, false);
+}
+
+SufkitSeedResult SufkitSeedIndex::EnumerateImpl(
+    const std::vector<SequenceRecord>& references,
+    const std::vector<SequenceRecord>& queries,
+    const AlignmentOptions& options, bool validated_owner) const {
     if (options.min_match == 0) {
         throw AlignmentError("sufkit seed min_match must be greater than zero");
     }
@@ -1024,8 +1057,9 @@ SufkitSeedResult SufkitSeedIndex::Enumerate(
     if (!implementation_) {
         throw AlignmentError("cannot query a moved-from sufkit seed index");
     }
-    ValidateRecords(references, "reference");
     ValidateRecords(queries, "query");
+    if (!validated_owner) {
+    ValidateRecords(references, "reference");
     if (references.size() != implementation_->reference_ids.size()) {
         throw AlignmentError(
             "reference collection differs from the ordered records used to "
@@ -1045,6 +1079,7 @@ SufkitSeedResult SufkitSeedIndex::Enumerate(
         }
     }
 
+    }
     try {
         const auto enumeration_begin = Clock::now();
         SufkitSeedResult result;
@@ -1684,6 +1719,7 @@ SufkitSeedResult SufkitSeedIndex::Enumerate(
     static_cast<void>(references);
     static_cast<void>(queries);
     static_cast<void>(options);
+    static_cast<void>(validated_owner);
     ThrowUnavailable();
 #endif
 }

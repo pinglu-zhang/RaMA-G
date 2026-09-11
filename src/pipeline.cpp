@@ -28,6 +28,9 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #if RAMAG_OPENMP_ENABLED
 #include <omp.h>
@@ -541,8 +544,9 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
       progress.Stage(stage, 0,
                      static_cast<std::uint64_t>(query.sequences.size()));
       observe_index("index-ready", index.BuildStatistics().resident_core_bytes);
-      seed_result = index.Enumerate(reference.sequences, query.sequences,
-                                         alignment_options);
+      seed_result = shared_index
+          ? index.EnumerateOwned(query.sequences, alignment_options)
+          : index.Enumerate(reference.sequences, query.sequences, alignment_options);
       seed_statistics.memory_observations.insert(seed_statistics.memory_observations.end(),
           std::make_move_iterator(seed_result.statistics.memory_observations.begin()),
           std::make_move_iterator(seed_result.statistics.memory_observations.end()));
@@ -1081,13 +1085,18 @@ BatchOutcome RunBatchPipeline(const BatchSpec& spec, std::string invocation,
   };
   const auto batch_begin = Clock::now();
   try {
-    FastaData reference;
+    // No writable alias survives reference initialization. The index aliases
+    // the sequence vector in this owner, so no reference bases are copied.
+    std::shared_ptr<const FastaData> reference_owner;
     std::optional<SufkitSeedIndex> index;
     {
       ProgressSession progress(spec.common.progress, logger ? logger->Id() : MakeNonce(), spec.common.threads, logger);
       progress.Stage("batch-reference-input", 0, spec.queries.size());
       const auto begin = Clock::now();
-      reference = ReadFasta(spec.common.reference_path);
+      reference_owner = std::make_shared<const FastaData>(ReadFasta(spec.common.reference_path));
+      const auto& reference = *reference_owner;
+      const std::shared_ptr<const std::vector<SequenceRecord>> records(
+          reference_owner, &reference.sequences);
       if (logger) logger->Info("batch shared_reference_input_seconds=" + std::to_string(SecondsBetween(begin, Clock::now())));
       const auto index_begin = Clock::now();
       SufkitIndexOptions options{spec.common.threads};
@@ -1100,11 +1109,11 @@ BatchOutcome RunBatchPipeline(const BatchSpec& spec, std::string invocation,
         progress.Stage("batch-index-build");
         ValidateCpuAffinityBudget(CurrentCpuAffinity(), spec.common.threads, "batch index build");
         ++outcome.index_build_calls;
-        index.emplace(SufkitSeedIndex::Build(reference.sequences, options));
+        index.emplace(SufkitSeedIndex::BuildOwned(records, options));
       } else {
         progress.Stage("batch-index-load");
         ++outcome.index_load_calls;
-        index.emplace(SufkitSeedIndex::Load(spec.common.reference_index_path, reference.sequences, options));
+        index.emplace(SufkitSeedIndex::LoadOwned(spec.common.reference_index_path, records, options));
       }
       const auto seconds = SecondsBetween(index_begin, Clock::now());
       if (logger) {
@@ -1126,7 +1135,13 @@ BatchOutcome RunBatchPipeline(const BatchSpec& spec, std::string invocation,
         (void)SaveReferenceIndex(save, reference, *index, invocation, binary_path, progress, seconds, timings, logger);
       }
     }
+    if (logger) logger->Info("batch scheduling=serial active_query_limit=1 reference_validation=once; threads apply within each query");
     for (std::size_t i = 0; i < spec.queries.size(); ++i) {
+      // Previous query objects have been destroyed before admitting the next.
+      // Return freed allocator pages on glibc; never touch the live index.
+#if defined(__GLIBC__)
+      (void)malloc_trim(0);
+#endif
       CheckInterruption("batch-query-boundary");
       auto& item = outcome.queries[i];
       const auto run = BatchQuerySpec(spec, spec.queries[i]);
@@ -1141,7 +1156,7 @@ BatchOutcome RunBatchPipeline(const BatchSpec& spec, std::string invocation,
         }
         if (!std::filesystem::is_regular_file(run.query_path)) throw FastaError("query is not a readable regular file: " + run.query_path.string());
         const auto result = RunAlignmentPipelineImpl(run, invocation, binary_path,
-            child_logger.get(), &reference, &*index,
+            child_logger.get(), reference_owner.get(), &*index,
             ":query=" + item.name + ":" + std::to_string(i + 1) + "/" + std::to_string(spec.queries.size()));
         item.alignment_count = result.statistics.alignment_count;
         item.status = "success";

@@ -187,6 +187,19 @@ public:
         const std::vector<SequenceRecord>& references,
         const SufkitIndexOptions& options = {});
 
+    // Transfers immutable ownership without copying reference bases. Owned
+    // enumeration reuses the reference validation performed by Build/Load.
+    [[nodiscard]] static SufkitSeedIndex BuildOwned(
+        std::shared_ptr<const std::vector<SequenceRecord>> references,
+        const SufkitIndexOptions& options = {});
+    [[nodiscard]] static SufkitSeedIndex LoadOwned(
+        const std::filesystem::path& path,
+        std::shared_ptr<const std::vector<SequenceRecord>> references,
+        const SufkitIndexOptions& options = {});
+    [[nodiscard]] SufkitSeedResult EnumerateOwned(
+        const std::vector<SequenceRecord>& queries,
+        const AlignmentOptions& options) const;
+
     void Save(const std::filesystem::path& path) const;
 
     SufkitSeedIndex(SufkitSeedIndex&&) noexcept;
@@ -214,6 +227,11 @@ public:
     [[nodiscard]] SufkitIndexStatistics BuildStatistics() const;
 
 private:
+    [[nodiscard]] SufkitSeedResult EnumerateImpl(
+        const std::vector<SequenceRecord>& references,
+        const std::vector<SequenceRecord>& queries,
+        const AlignmentOptions& options, bool validated_owner) const;
+    std::shared_ptr<const std::vector<SequenceRecord>> owned_reference_;
     struct Impl;
     explicit SufkitSeedIndex(std::unique_ptr<Impl> implementation) noexcept;
     std::unique_ptr<Impl> implementation_;
