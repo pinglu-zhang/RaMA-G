@@ -155,10 +155,6 @@ void MergeIntervals(std::vector<Interval>& intervals) {
     return candidate.first <= begin && candidate.second >= end;
 }
 
-[[nodiscard]] std::size_t StrandIndex(Strand strand) {
-    return strand == Strand::Forward ? 0U : 1U;
-}
-
 // Append-only storage: vector growth never copies an entire large MAM task.
 // Small tasks start small; no chunk exceeds 65,536 entries.
 class MamSeedStorage {
@@ -1057,7 +1053,10 @@ SufkitSeedResult SufkitSeedIndex::EnumerateImpl(
     if (!implementation_) {
         throw AlignmentError("cannot query a moved-from sufkit seed index");
     }
-    ValidateRecords(queries, "query");
+    // Fast permits an empty task list; retain other modes' input contract.
+    if (!queries.empty() || options.seed_mode != SeedMode::FastHierarchical) {
+        ValidateRecords(queries, "query");
+    }
     if (!validated_owner) {
     ValidateRecords(references, "reference");
     if (references.size() != implementation_->reference_ids.size()) {
@@ -1539,9 +1538,153 @@ SufkitSeedResult SufkitSeedIndex::EnumerateImpl(
             observe_mam("mam-chunks-merged");
             result.statistics.mam_workspace_peak_bytes =
                 workspace_budget.Peak();
+        } else if (options.seed_mode == SeedMode::FastHierarchical) {
+            struct alignas(64) FastTask {
+                MamSeedStorage seeds;
+                std::uint64_t mam{}, mem{}, covered{};
+                std::exception_ptr failure;
+                bool completed{};
+            };
+            if (queries.size() > std::numeric_limits<std::size_t>::max() / 2U) {
+                throw AlignmentError("Fast oriented query count exceeds size range");
+            }
+            const std::size_t task_count = queries.size() * 2U;
+            std::vector<FastTask> tasks(task_count);
+            const auto scheduled_threads = static_cast<std::uint32_t>(
+                std::max<std::size_t>(1, std::min<std::size_t>(
+                    implementation_->statistics.requested_threads, task_count)));
+            result.statistics.query_scheduled_threads = scheduled_threads;
+            result.statistics.query_strand_task_count = task_count;
+            result.statistics.oriented_query_count = task_count;
+            std::atomic<bool> cancelled{false};
+            const auto run_task = [&](std::size_t task_id) {
+                auto& task = tasks[task_id];
+                try {
+                    const auto check_cancel = [&] {
+                        if (cancelled.load(std::memory_order_relaxed)) {
+                            throw MamTaskCancelled{};
+                        }
+                        if (options.interruption_callback) {
+                            options.interruption_callback("seed-enumeration");
+                        }
+                    };
+                    check_cancel();
+                    const auto& query = queries[task_id / 2U];
+                    const bool reverse = task_id % 2U != 0;
+                    const std::string reverse_bases =
+                        reverse ? ReverseComplement(query.bases) : std::string{};
+                    const std::string_view bases = reverse
+                        ? std::string_view{reverse_bases}
+                        : std::string_view{query.bases};
+                    const OrientedQueryView oriented{task_id / 2U,
+                        reverse ? Strand::Reverse : Strand::Forward, bases};
+                    std::vector<Interval> coverage;
+                    const auto append = [&](const ExtendedMatch& match) {
+                        if (task.seeds.size() == task.seeds.capacity()) {
+                            const auto free_in_chunk = MamSeedStorage::kChunkSeeds -
+                                task.seeds.capacity() % MamSeedStorage::kChunkSeeds;
+                            const auto growth = std::min<std::size_t>(free_in_chunk,
+                                std::max<std::size_t>(64, task.seeds.capacity()));
+                            task.seeds.reserve(CheckedAdd(task.seeds.capacity(),
+                                growth, "Fast seed capacity"));
+                        }
+                        task.seeds.push_back(ToPublicSeed(match, oriented, query,
+                            implementation_->reference_ids));
+                    };
+                    auto task_mam = mam_options;
+                    task_mam.strands = sufkit::StrandMode::kForward;
+                    implementation_->index.ForEachMam(bases, task_mam,
+                        [&](const sufkit::MamMatch& match) {
+                            check_cancel();
+                            const auto mapped = ValidateAndMapLocalMatch(match,
+                                0, bases, bases, implementation_->reference_lengths,
+                                "Fast MAM");
+                            if (mapped.length < options.min_match) {
+                                throw AlignmentError("Fast MAM shorter than min_match");
+                            }
+                            ++task.mam;
+                            coverage.push_back({mapped.oriented_query_begin,
+                                CheckedEnd(mapped.oriented_query_begin,
+                                    mapped.length, "Fast MAM coverage")});
+                            append(mapped);
+                        });
+                    MergeIntervals(coverage);
+                    check_cancel();
+                    auto task_mem = mem_options;
+                    task_mem.strands = sufkit::StrandMode::kForward;
+                    implementation_->index.ForEachMem(bases, task_mem,
+                        [&](const sufkit::MemMatch& match) {
+                            check_cancel();
+                            const auto mapped = ValidateAndMapLocalMatch(match,
+                                0, bases, bases, implementation_->reference_lengths,
+                                "Fast MEM");
+                            if (mapped.length < options.min_match) {
+                                throw AlignmentError("Fast MEM shorter than min_match");
+                            }
+                            ++task.mem;
+                            if (IsCovered(coverage, mapped.oriented_query_begin,
+                                CheckedEnd(mapped.oriented_query_begin,
+                                    mapped.length, "Fast MEM coverage"))) {
+                                ++task.covered;
+                            } else {
+                                append(mapped);
+                            }
+                        });
+                    check_cancel();
+                    task.completed = true;
+                } catch (const MamTaskCancelled&) {
+                    // Another stable task slot retains the originating error.
+                } catch (...) {
+                    task.failure = std::current_exception();
+                    cancelled.store(true, std::memory_order_relaxed);
+                }
+            };
+            std::uint32_t actual_threads = 1;
+#ifdef _OPENMP
+            const bool enter_parallel_region =
+                scheduled_threads > 1 && omp_in_parallel() == 0;
+#pragma omp parallel if(enter_parallel_region) num_threads(scheduled_threads)
+            {
+#pragma omp single
+                { actual_threads = static_cast<std::uint32_t>(omp_get_num_threads()); }
+#pragma omp for schedule(dynamic, 1)
+                for (std::size_t id = 0; id < task_count; ++id) run_task(id);
+            }
+#else
+            for (std::size_t id = 0; id < task_count; ++id) run_task(id);
+#endif
+            result.statistics.query_actual_threads = actual_threads;
+            result.statistics.query_parallel_route = actual_threads > 1
+                ? "openmp-query-record-strand-dynamic-v1"
+                : "serial-query-record-strand-v1";
+            result.statistics.actual_route += "+" + result.statistics.query_parallel_route;
+            for (const auto& task : tasks) {
+                if (task.failure) std::rethrow_exception(task.failure);
+            }
+            std::uint64_t seed_count = 0;
+            for (const auto& task : tasks) {
+                if (!task.completed) throw AlignmentError("incomplete Fast search task");
+                ++result.statistics.query_strand_tasks_completed;
+                CheckedAccumulate(result.statistics.mam_occurrence_count, task.mam, "Fast MAM count");
+                CheckedAccumulate(result.statistics.mem_occurrence_count, task.mem, "Fast MEM count");
+                CheckedAccumulate(result.statistics.mem_covered_by_mam_count, task.covered, "Fast covered MEM count");
+                CheckedAccumulate(seed_count, task.seeds.size(), "Fast seed count");
+            }
+            if (seed_count > result.seeds.max_size()) {
+                throw AlignmentError("Fast result exceeds vector size range");
+            }
+            result.statistics.raw_selected_seed_count = seed_count;
+            result.seeds.reserve(static_cast<std::size_t>(seed_count));
+            for (auto& task : tasks) {
+                for (auto& chunk : task.seeds.chunks) {
+                    result.seeds.insert(result.seeds.end(),
+                        std::make_move_iterator(chunk.begin()),
+                        std::make_move_iterator(chunk.end()));
+                    std::vector<Seed>().swap(chunk);
+                }
+            }
         } else {
             for (const SequenceRecord& query : queries) {
-                std::array<std::vector<Interval>, 2> mam_coverage;
 
             if (options.seed_mode == SeedMode::Mum) {
                 implementation_->index.ForEachMum(
@@ -1626,40 +1769,7 @@ SufkitSeedResult SufkitSeedIndex::EnumerateImpl(
                     "SMEM interval count");
             }
 
-            if (options.seed_mode == SeedMode::FastHierarchical) {
-                implementation_->index.ForEachMam(
-                    query.bases, mam_options,
-                    [&](const sufkit::MamMatch& match) {
-                        if (options.interruption_callback) {
-                            options.interruption_callback("seed-enumeration");
-                        }
-                        Seed seed = ConvertMatch(
-                            match, query, implementation_->reference_ids,
-                            implementation_->reference_lengths);
-                        if (seed.length < options.min_match) {
-                            throw AlignmentError(
-                                "sufkit MAM callback returned a seed shorter "
-                                "than min_match");
-                        }
-                        ++result.statistics.mam_occurrence_count;
-                        ++result.statistics.raw_selected_seed_count;
-                        if (options.seed_mode == SeedMode::FastHierarchical) {
-                            mam_coverage[StrandIndex(seed.strand)].push_back(
-                                {seed.query_begin,
-                                 CheckedEnd(seed.query_begin, seed.length,
-                                            "MAM query interval")});
-                        }
-                        result.seeds.push_back(std::move(seed));
-                    });
-            }
-
-            if (options.seed_mode == SeedMode::FastHierarchical) {
-                MergeIntervals(mam_coverage[0]);
-                MergeIntervals(mam_coverage[1]);
-            }
-
-            if (options.seed_mode == SeedMode::FastHierarchical ||
-                options.seed_mode == SeedMode::MaxMatch) {
+            if (options.seed_mode == SeedMode::MaxMatch) {
                 implementation_->index.ForEachMem(
                     query.bases, mem_options,
                     [&](const sufkit::MemMatch& match) {
@@ -1675,16 +1785,6 @@ SufkitSeedResult SufkitSeedIndex::EnumerateImpl(
                                 "than min_match");
                         }
                         ++result.statistics.mem_occurrence_count;
-                        if (options.seed_mode == SeedMode::FastHierarchical) {
-                            const Position end = CheckedEnd(
-                                seed.query_begin, seed.length,
-                                "MEM query interval");
-                            if (IsCovered(mam_coverage[StrandIndex(seed.strand)],
-                                          seed.query_begin, end)) {
-                                ++result.statistics.mem_covered_by_mam_count;
-                                return;
-                            }
-                        }
                         ++result.statistics.raw_selected_seed_count;
                         result.seeds.push_back(std::move(seed));
                     });

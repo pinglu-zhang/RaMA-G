@@ -1,4 +1,5 @@
 #include "ramag/cli.hpp"
+#include "ramag/pairwise_core.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -808,6 +809,7 @@ std::string VersionText() {
 std::string EffectiveConfigText(const RunSpec& spec) {
   const auto openmp = CurrentOpenMpRuntimeInfo();
   std::ostringstream output;
+  output << PairwiseConfigurationText(spec.alignment);
   output << "alignment_core=pairwise\n"
          << "pairwise_source_commit=7d08359e0df7f7e6ffcfe67217c3399761cb2129\n"
          << "extension_scoring=scaled-HOXD70;gap-open=40;gap-extend=3\n"

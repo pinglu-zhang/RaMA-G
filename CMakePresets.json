@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {"major": 3, "minor": 22, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "coverage-40-500",
+      "displayName": "B+D+C+S+E coverage candidate (run with min-cluster 40 / max-gap 500)",
+      "inherits": "coverage-50-250",
+      "binaryDir": "${sourceDir}/build/coverage-40-500"
+    },
+    {
+      "name": "coverage-50-250",
+      "displayName": "B+D+C+S+E coverage candidate (run with min-cluster 50 / max-gap 250)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/coverage-50-250",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RAMAG_WARNINGS_AS_ERRORS": "ON",
+        "RAMAG_INTERNAL_LCP_ENCODING": "byte-coded",
+        "RAMAG_INTERNAL_POST_SELECTION": "fragment-reselect-v1",
+        "RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT": "ON",
+        "RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN": "ON",
+        "RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS": "ON",
+        "RAMAG_INTERNAL_SUPPLEMENT_SHORT_CHAIN": "ON",
+        "RAMAG_INTERNAL_EXTEND_SELECTED_ENDPOINTS": "ON",
+        "RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE": "OFF",
+        "RAMAG_INTERNAL_COVERAGE_RECOVERY": "OFF",
+        "RAMAG_INTERNAL_GUARDED_RECOVERY": "OFF",
+        "RAMAG_INTERNAL_GAP_FILL": "off",
+        "RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES": "OFF",
+        "RAMAG_INTERNAL_LINK_PRECHECK": "OFF",
+        "RAMAG_INTERNAL_STRAND_AWARE_MERGE": "OFF",
+        "RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL": "OFF",
+        "RAMAG_INTERNAL_HALF_OPEN_CHAINING": "OFF",
+        "RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "coverage-40-500", "configurePreset": "coverage-40-500", "targets": ["ramag"]},
+    {"name": "coverage-50-250", "configurePreset": "coverage-50-250", "targets": ["ramag"]}
+  ]
+}

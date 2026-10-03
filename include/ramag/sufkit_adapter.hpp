@@ -131,9 +131,9 @@ struct SufkitSeedStatistics {
     std::uint64_t raw_selected_seed_count{};
     std::uint64_t selected_seed_count{};
 
-    // Reference-MAM enumeration uses stable task slots for every oriented
-    // query tile and internal-boundary recovery window.  Other seed modes
-    // leave task counts at zero and report one actual query thread.
+    // Reference-MAM uses oriented tiles and boundary recovery windows; Fast
+    // uses complete query-record/strand tasks. Other modes report no tasks
+    // and one actual query thread. Actual threads may be below the budget.
     std::uint32_t query_requested_threads{1};
     std::uint32_t query_scheduled_threads{1};
     std::uint32_t query_actual_threads{1};

@@ -89,6 +89,18 @@ interval and expand all reference occurrences.
 whole-record maximality checks, boundary MEM recovery and reference-uniqueness
 verification. `mum` and `smem` use whole-query-record serial enumeration.
 `fast` uses the existing MAM skeleton followed by whole-query MEM filtering.
+It assigns stable task IDs `2*i` and `2*i+1` to the forward and reverse
+orientations of record `i`. OpenMP schedules whole-record tasks dynamically,
+up to the smaller of the requested thread count and task count. Inside an
+existing OpenMP region, enumeration runs serially rather than nesting teams.
+Each task searches only the forward strand of its oriented sequence, owns its
+coverage intervals, chunked seeds and counters, and releases its temporary
+reverse complement on completion. Reverse coordinates are converted back to
+the original query coordinates. All MEM searches still run in full.
+Callbacks share only the immutable index; exceptions are captured per task,
+peers stop cooperatively, and failures are rethrown outside the parallel region.
+Task-order merging and final sorting preserve seed and alignment determinism.
+The existing query thread/task statistics report the actual execution route.
 Task results merge in deterministic order before final sorting/deduplication.
 Small independent oracles remain internal tests, not production fallback routes.
 
@@ -206,9 +218,32 @@ does not imply sanitizer coverage of an uninstrumented third-party binary.
 Public release builds remain supported without internal tests or planning files.
 Runtime performance and biological accuracy require separately frozen evidence.
 
-The pending 0.1.1 version is defined by CMake `PROJECT_VERSION`; it supplies
-`RAMAG_VERSION` for CLI/SAM identification and the installed package version.
-Version preparation changes only that definition and documentation. Historical
-Release/Werror and sanitizer results cover the previously accepted loading
-implementation, not a fresh execution of the pending version. See the
-[changelog](../CHANGELOG.md) for the release boundary.
+## Experimental low-overhead coverage controls
+
+Production defaults remain unchanged. Independent internal options
+`RAMAG_INTERNAL_STRAND_AWARE_MERGE`,
+`RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL`, and
+`RAMAG_INTERNAL_HALF_OPEN_CHAINING` test checked oriented-query geometry.
+They do not introduce a MEM search. The existing alternative-chain option
+rejects a residual seed set before allocating a second chain when its total
+seed-length upper bound is below `min_cluster`; otherwise it retains the
+original DP, scoring, and extension.
+
+`RAMAG_INTERNAL_GAP_FILL=budgeted-ksw2-gap-v1` is an optional experimental
+post-selection policy. Reliable, non-recursive flanks and both-axis occupancy
+checks are shared with guarded gap filling. Canonical exact gaps of 1–10,000
+bases require no DP budget. Nonexact gaps are limited to 1–1,000 bases on each
+axis. Each reserves `3 * (r + 1) * (q + 1)` grid positions against
+`min(500000000, reference_bases, query_bases)` for the current query file.
+The factor three bounds global KSW2 attempts in the current implementation;
+it does not bound wall time or machine instructions.
+
+Reservation precedes execution in deterministic order (flank identity,
+estimated work, coordinates, and stable parent IDs). Oversized jobs are counted
+and skipped; later smaller jobs remain eligible. Reservations are not refunded.
+At most 64 proposal slots are processed per batch under the existing thread
+budget. Short residual fragments and new fill records are not new flanks.
+The public core uses `GapFillMode::BudgetedKsw2GapV1`; a host may reduce
+`gap_fill_work_budget`, but cannot raise the frozen 500,000,000 cap. Logs
+distinguish budget/length skips, reserved work, and actual KSW2 calls.
+These policies do not promise improved quality or performance before validation.

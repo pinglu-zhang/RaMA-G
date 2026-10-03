@@ -251,12 +251,20 @@ uses complete query records and is serial at the Sufkit enumeration layer.
 MUMREFERENCE uses stable 4 MiB tiles plus boundary recovery and whole-record
 maximality/reference-uniqueness verification.
 
+Fast searches complete query records as separate forward and reverse tasks,
+scheduled dynamically with OpenMP within `--threads`. Each task performs MAM
+search followed by complete MEM search and the same MAM-coverage filtering.
+Results are merged in stable task order and sorted deterministically. A single
+query record exposes at most two search tasks, even with `--threads 32`.
+Concurrent tasks require their own search buffers and reverse-complement
+storage; peak search memory can increase relative to serial enumeration.
+
 `--selection-mode all` is the default and exposes valid pairwise candidates.
 `one-to-one` uses the current pairwise reference-side and query-side DP selection
 and retains their intersection. It does not use the former reciprocal elementary
 interval selector and does not claim equivalence to MUMmer4 `delta-filter -1`.
-The residual recovery and guarded gap-fill build settings retain their existing
-defaults in 0.1.1. The index-loading update changes neither selection nor scoring.
+The internal residual recovery and guarded gap-fill build settings remain as
+before this input/logging migration; neither is silently enabled by this change.
 
 ## Alignment options
 
@@ -370,8 +378,7 @@ Replace automation that waits for `.complete` or reads `.manifest.json` with
 process-exit checks, output parsing and `run.log` inspection. Index bundles become
 single files; old companion files can be left in place. Library consumers of
 removed manifest/SHA-256/SeqPro headers must migrate to `RunStatistics`, `ReadFasta`
-or the existing pairwise interfaces. These input/logging migration changes
-precede 0.1.1; they are not additional interface removals in this patch release.
+or the existing pairwise interfaces. No version-number change is made here.
 
 Current limitations include no automatic comparison/report pipeline, automatic
 index discovery, random-access gzip index, compressed output, BAM/CRAM, VCF,

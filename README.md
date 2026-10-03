@@ -15,7 +15,14 @@ query multi-FASTA using a complete Sufkit suffix array and a KSW2 pairwise core.
 
 See the [user guide](docs/user-guide.md) for commands and input/output contracts,
 and the [developer guide](docs/developer-guide.md) for the algorithms and library.
-See the [changelog](CHANGELOG.md) for the pending 0.1.1 release and compatibility notes.
+
+See the [changelog](CHANGELOG.md) for release and compatibility notes.
+
+The opt-in [coverage-40-500 profile](docs/coverage-profile.md) reproduces the
+B+D+C+S+E build with explicit `--min-cluster 40 --max-gap 500` run parameters.
+The previous coverage-50-250 preset remains available. Ordinary defaults remain
+unchanged. The 40/500 candidate exceeds the historical MUMmer4 coverage comparator,
+but its simulated median F1 is slightly below 50/250; see the profile's evidence.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

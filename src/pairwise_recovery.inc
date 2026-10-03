@@ -10,6 +10,14 @@ public:
         if(it!=m.begin()){auto p=std::prev(it);if(p->second>=b){b=p->first;e=std::max(e,p->second);it=m.erase(p);}}
         while(it!=m.end()&&it->first<=e){e=std::max(e,it->second);it=m.erase(it);}m.emplace_hint(it,b,e);
     }
+    void remove(SequenceId id,Length b,Length e) {
+        auto d=data.find(id);if(d==data.end()||b>=e)throw AlignmentError("occupied removal missing interval");
+        auto& m=d->second;auto it=m.upper_bound(b);
+        if(it==m.begin())throw AlignmentError("occupied removal missing start");
+        --it;const auto x=it->first,y=it->second;
+        if(x>b||y<e)throw AlignmentError("occupied removal crosses gap");
+        m.erase(it);if(x<b)m.emplace(x,b);if(e<y)m.emplace(e,y);
+    }
     // Boundaries are expressed in consumed-base coordinates, including reverse.
     std::pair<bool,Length> run(SequenceId id,Length p,Length limit,bool reverse=false) const {
         const auto d=data.find(id);if(d==data.end())return {false,limit};
@@ -40,12 +48,25 @@ struct RecoveryHigher {
                std::tie(b.parent,b.rb,b.qb,b.re,b.qe,b.column_begin);
     }
 };
+struct RecoveryBounds { Length rb{},re{},qb{},qe{}; };
+// Cursor denotes the next forward base or one past the next reverse base.
+std::pair<bool,Length> RecoveryWindowRun(Length p,Length limit,Length b,Length e,bool reverse) {
+    if(!reverse) {
+        if(p<b)return {false,std::min(limit,b-p)};
+        if(p>=e)return {false,limit};
+        return {true,std::min(limit,e-p)};
+    }
+    if(p>e)return {false,std::min(limit,p-e)};
+    if(p<=b)return {false,limit};
+    return {true,std::min(limit,p-b)};
+}
 template<class Emit>
 void ScanRecoveryFragments(const pairwise_detail::Anchor& a,size_t parent,
                           Length column_begin,Length column_end,
                           const Sequences& refs,const Sequences& qrys,
                           const OccupiedIntervals& ro,const OccupiedIntervals& qo,
-                          Length minimum,const PairwiseCoreOptions& options,Emit emit) {
+                          Length minimum,const PairwiseCoreOptions& options,Emit emit,
+                          const RecoveryBounds* bounds=nullptr,PairwiseStatistics* scan_stats=nullptr) {
     const auto& r=refs.at(a.reference_id)->bases;const auto& q=qrys.at(a.query_id)->bases;
     Length rp=a.reference_begin,qp=a.strand==Strand::Forward?a.query_begin:a.query_begin+a.qry_len,col=0;
     RecoveryFragment f{};bool open=false;Length last_col=0,last_r=0,last_q=0,last_matches=0;
@@ -57,6 +78,7 @@ void ScanRecoveryFragments(const pairwise_detail::Anchor& a,size_t parent,
             const double identity=static_cast<float>(f.matches)/f.columns;
             f.score=f.columns*std::pow(identity,2);emit(f);
         }
+        if(open&&last_matches<minimum&&scan_stats)++scan_stats->post_selection_support_rejected;
         open=false;f={};last_matches=0;
     };
     const auto advance=[&](unsigned op,Length n){if(op!=1)rp+=n;if(op!=2){if(a.strand==Strand::Forward)qp+=n;else qp-=n;}col+=n;};
@@ -68,6 +90,13 @@ void ScanRecoveryFragments(const pairwise_detail::Anchor& a,size_t parent,
             if(col<column_begin){const auto n=std::min(left,column_begin-col);advance(op,n);left-=n;continue;}
             if(options.interruption_callback)options.interruption_callback("coverage-recovery");
             Length n=std::min(left,column_end-col);
+            if(bounds) {
+                const auto wr=op==1?std::pair{true,n}:RecoveryWindowRun(rp,n,bounds->rb,bounds->re,false);
+                const auto wq=op==2?std::pair{true,n}:RecoveryWindowRun(qp,n,bounds->qb,bounds->qe,a.strand==Strand::Reverse);
+                n=std::min(wr.second,wq.second);
+                if(n==0)throw AlignmentError("recovery window failed to advance");
+                if(!wr.first||!wq.first){finish();advance(op,n);left-=n;continue;}
+            }
             const auto rr=op==1?std::pair{false,n}:ro.run(a.reference_id,rp,n);
             const auto qr=op==2?std::pair{false,n}:qo.run(a.query_id,qp,n,a.strand==Strand::Reverse);
             n=std::min(rr.second,qr.second);if(n==0)throw AlignmentError("recovery failed to advance");
@@ -79,7 +108,7 @@ void ScanRecoveryFragments(const pairwise_detail::Anchor& a,size_t parent,
                 const char x=op==1?'A':r.at(rp);
                 const char y=op==2?'A':(a.strand==Strand::Forward?q.at(qp):Complement(q.at(qp-1)));
                 const bool paired=op!=1&&op!=2;
-                if(x=='N'||y=='N'){finish();advance(op,1);continue;}
+                if(x=='N'||y=='N'){if(scan_stats)++scan_stats->post_selection_n_breaks;finish();advance(op,1);continue;}
                 if(paired&&!open){open=true;f.column_begin=col;f.rb=rp;f.qb=qp;f.matches=0;}
                 if(open&&paired&&x==y)++f.matches;
                 advance(op,1);
@@ -102,18 +131,23 @@ pairwise_detail::Anchor MaterializeRecovery(const pairwise_detail::Anchor& a,con
         col+=n;if(col>=f.column_end)break;
     }
     pairwise_detail::Anchor result(a.reference_id,f.rb,f.re-f.rb,a.query_id,f.qb,f.qe-f.qb,a.strand,f.columns,f.matches,std::move(cigar));
+    result.candidate_source=a.candidate_source;
     result.ref_selected=result.qry_selected=true;return result;
 }
 pairwise_detail::AnchorVec RecoverResidualAnchors(const pairwise_detail::AnchorVec& anchors,
         const Sequences& refs,const Sequences& qrys,const PairwiseCoreOptions& options,
-        PairwiseStatistics& stats) {
+        PairwiseStatistics& stats,
+        const std::function<bool(const pairwise_detail::Anchor&,const RecoveryFragment&)>& accepts={}) {
     const auto begin=KernelClock::now();OccupiedIntervals ro,qo;
     for(const auto& a:anchors)if(a.ref_selected&&a.qry_selected){ro.add(a.reference_id,a.reference_begin,a.reference_begin+a.ref_len);qo.add(a.query_id,a.query_begin,a.query_begin+a.qry_len);}
     std::priority_queue<RecoveryFragment,std::vector<RecoveryFragment>,RecoveryHigher> queue;
     for(size_t i=0;i<anchors.size();++i){const auto& a=anchors[i];if(a.ref_selected&&a.qry_selected)continue;
         ++stats.recovery_candidates_checked;
         (void)ConvertAnchor(a,refs,qrys,false); // Validate even candidates with no residual.
-        ScanRecoveryFragments(a,i,0,UINT64_MAX,refs,qrys,ro,qo,options.min_cluster,options,[&](const auto& f){queue.push(f);++stats.recovery_proposed_fragments;});
+        ScanRecoveryFragments(a,i,0,UINT64_MAX,refs,qrys,ro,qo,options.min_cluster,options,[&](const auto& f){
+            if(accepts&&!accepts(a,f)){++stats.recovery_guard_rejections;return;}
+            queue.push(f);++stats.recovery_proposed_fragments;
+        });
     }
     pairwise_detail::AnchorVec output;
     while(!queue.empty()){
@@ -121,7 +155,8 @@ pairwise_detail::AnchorVec RecoverResidualAnchors(const pairwise_detail::AnchorV
         bool unchanged=false;
         ScanRecoveryFragments(a,f.parent,f.column_begin,f.column_end,refs,qrys,ro,qo,options.min_cluster,options,[&](const auto& g){
             if(g.column_begin==f.column_begin&&g.column_end==f.column_end&&g.matches==f.matches)unchanged=true;
-            else{queue.push(g);++stats.recovery_requeued_fragments;}
+            else if(!accepts||accepts(a,g)){queue.push(g);++stats.recovery_requeued_fragments;}
+            else ++stats.recovery_guard_rejections;
         });
         if(!unchanged)continue;
         auto recovered=MaterializeRecovery(a,f);(void)ConvertAnchor(recovered,refs,qrys,false);
