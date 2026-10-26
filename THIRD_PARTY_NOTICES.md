@@ -1,6 +1,7 @@
 # Third-party notices
 
-RaMA-G is distributed under the MIT License in [LICENSE](LICENSE).
+RaMA-G's own code is distributed under the MIT License in [LICENSE](LICENSE).
+Separately licensed bundled/linked components retain their licenses below.
 The root license retains both RaMA-G contributor and Pinglu Zhang copyright.
 
 ## Sufkit
@@ -13,6 +14,23 @@ applies when fetched/linked. RaMA-G does not directly depend on SeqPro.
 
 Vendored `third_party/ksw2/ksw2.h` and `ksw2_extz2_sse.c` retain their upstream
 MIT notices; see [KSW2 license](third_party/ksw2/LICENSE).
+
+## RaMA centromere backend and WFA2
+
+The source-derived single-pair centromere backend uses
+`pinglu-zhang/RaMA@7bc89c4902bc9254f18cc4b05c4bf491a10bd7cb`.
+The original snapshot and its Apache-2.0 license are retained in
+`third_party/rama/upstream`. Adaptations in `third_party/rama/core` preserve
+the original algorithm rules while adding library ownership, safety fixes,
+deterministic unknown-base handling and cancellation. The scope of the
+changes is documented in `docs/centromere-rama-integration.md`.
+
+WFA2 is fetched at `99a5879a3a2972eff168cbcc6610b6cf02844ed0` and retains
+its MIT license, installed alongside the RaMA license. Four safety-patched
+translation units in `third_party/rama/wfa_safety` preserve upstream notices;
+they replace unaligned accesses and an undefined empty-trace shift, without
+changing alignment penalties or heuristic defaults. These components are
+linked only when `RAMAG_ENABLE_CENTROMERE=ON`.
 
 ## kseq and spdlog
 

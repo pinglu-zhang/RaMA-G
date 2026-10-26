@@ -156,6 +156,7 @@ target_link_libraries(ramag_core PRIVATE ramag_pairwise)
 target_compile_features(ramag_core PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB Threads::Threads)
+include(cmake/RaMACentromere.cmake)
 target_include_directories(ramag_core SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include ${PROJECT_SOURCE_DIR}/third_party/kseq)
 target_include_directories(
   ramag_core
@@ -246,6 +247,31 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/t
   target_link_libraries(ramag_unit_tests PRIVATE ramag_legacy_oracle RaMA-G::core)
   ramag_apply_project_warnings(ramag_unit_tests)
   add_test(NAME ramag.unit COMMAND ramag_unit_tests)
+
+  add_executable(ramag_centromere_interface_tests tests/centromere_interface_tests.cpp)
+  if(RAMAG_ENABLE_CENTROMERE)
+    include(cmake/RaMACentromereTests.cmake)
+    add_executable(ramag_centromere_backend_tests tests/centromere_backend_tests.cpp)
+    target_include_directories(ramag_centromere_backend_tests PRIVATE src)
+    target_include_directories(ramag_centromere_backend_tests SYSTEM PRIVATE third_party/rama/core)
+    target_include_directories(ramag_centromere_backend_tests SYSTEM PRIVATE "${_wfa}")
+    target_link_libraries(ramag_centromere_backend_tests PRIVATE RaMAG::centromere)
+    ramag_apply_project_warnings(ramag_centromere_backend_tests)
+    add_test(NAME ramag.centromere.backend COMMAND ramag_centromere_backend_tests "${PROJECT_SOURCE_DIR}/tests/fixtures")
+  else()
+    add_executable(ramag_centromere_disabled_tests tests/centromere_disabled_backend_tests.cpp)
+    target_include_directories(ramag_centromere_disabled_tests PRIVATE src)
+    target_link_libraries(ramag_centromere_disabled_tests PRIVATE RaMAG::centromere)
+    ramag_apply_project_warnings(ramag_centromere_disabled_tests)
+    add_test(NAME ramag.centromere.disabled-backend COMMAND ramag_centromere_disabled_tests)
+  endif()
+  target_link_libraries(ramag_centromere_interface_tests PRIVATE RaMA-G::core)
+  ramag_apply_project_warnings(ramag_centromere_interface_tests)
+  add_test(NAME ramag.centromere.interface COMMAND ramag_centromere_interface_tests)
+  add_test(NAME ramag.centromere.cli
+    COMMAND "${CMAKE_COMMAND}" -DRAMAG_EXE=$<TARGET_FILE:ramag>
+      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/centromere-cli-check
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/centromere_cli.cmake)
 
   add_test(
     NAME ramag.openmp.config

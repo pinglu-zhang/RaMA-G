@@ -1,4 +1,6 @@
 #include "ramag/cli.hpp"
+#include "ramag/centromere_direction.hpp"
+#include "ramag/centromere_blocks.hpp"
 #include "ramag/pairwise_core.hpp"
 
 #include <algorithm>
@@ -460,8 +462,15 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
   bool have_work_dir = false;
   bool have_formats = false;
   bool have_smem_min_occurrences = false;
+  std::string centromere_incompatible;
   for (int index = 2; index < argc; ++index) {
     const std::string_view option = argv[index];
+    if (option == "--reference-index" || option == "--save" || option == "--seed-mode" ||
+        option == "--selection-mode" || option == "--min-match" || option == "--smem-min-occurrences" ||
+        option == "--max-gap" || option == "--diag-diff" || option == "--diag-factor" ||
+        option == "--min-cluster" || option == "--break-length" || option == "--max-dp-cells") {
+      if (centromere_incompatible.empty()) centromere_incompatible = option;
+    }
     if (option == "--help" || option == "-h") parsed.show_help = true;
     else if (option == "--version") parsed.show_version = true;
     else if (option == "--print-effective-config") parsed.print_effective_config = true;
@@ -483,6 +492,19 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
         parsed.batch_spec.queries.push_back({stem.string(), parsed.run_spec.query_path});
       }
       have_query = true;
+    } else if (option == "-c" || option == "--centromere") {
+      if (batch) throw CliError("centromere options are supported only by align");
+      if (parsed.run_spec.centromere.whole_input) throw CliError("--centromere may appear only once");
+      parsed.run_spec.centromere.whole_input = true;
+    } else if (option == "--ref-cen" || option == "--reference-centromeres" ||
+               option == "--query-cen" || option == "--query-centromeres") {
+      if (batch) throw CliError("centromere options are supported only by align");
+      auto& path = (option == "--ref-cen" || option == "--reference-centromeres")
+                       ? parsed.run_spec.centromere.reference_bed
+                       : parsed.run_spec.centromere.query_bed;
+      if (!path.empty()) throw CliError(std::string(option) + " may appear only once (including its alias)");
+      path = RequireValue(argc, argv, index, option);
+      if (path.empty()) throw CliError(std::string(option) + " requires a BED path");
     } else if (batch && option == "--seqfile") {
       if (!parsed.batch_spec.seqfile.empty()) throw CliError("--seqfile may appear only once");
       parsed.batch_spec.seqfile = RequireValue(argc, argv, index, option);
@@ -536,6 +558,11 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
     } else throw CliError("unknown option: " + std::string(option));
   }
   if (parsed.show_help || parsed.show_version) return parsed;
+  if (parsed.run_spec.centromere.whole_input && !centromere_incompatible.empty())
+    throw CliError("--centromere does not accept genome-only option " + centromere_incompatible);
+  if (parsed.run_spec.centromere.whole_input && CentromereCliAnchorsOnly() &&
+      !parsed.print_effective_config && (have_formats || !parsed.run_spec.outputs.empty()))
+    throw CliError("this build exports centromere anchors only; use --output-prefix, not --output/--formats");
   if (!have_reference) throw CliError("missing required option --reference");
   if (have_smem_min_occurrences && parsed.run_spec.alignment.seed_mode != SeedMode::Smem) {
     throw CliError("--smem-min-occurrences requires --seed-mode smem");
@@ -572,7 +599,11 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
   if (!have_prefix && parsed.run_spec.outputs.empty()) {
     throw CliError("missing required option --output-prefix or --output");
   }
-  if (!have_work_dir) throw CliError("missing required option --work-dir");
+  if (!have_work_dir) {
+    if (parsed.run_spec.centromere.whole_input)
+      parsed.run_spec.work_dir = parsed.run_spec.output_prefix.parent_path() / ".ramag-work";
+    else throw CliError("missing required option --work-dir");
+  }
   if (have_smem_min_occurrences && parsed.run_spec.alignment.seed_mode != SeedMode::Smem) {
     throw CliError("--smem-min-occurrences requires --seed-mode smem");
   }
@@ -581,10 +612,20 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
 }
 
 void ValidateRunSpec(const RunSpec& spec) {
+  if (spec.centromere.whole_input &&
+      (!spec.reference_index_path.empty() || !spec.save_index_path.empty()))
+    throw CliError("--centromere does not support index loading or saving");
+  try {
+    (void)LoadCentromereAnnotations(spec.centromere);
+  } catch (const CentromereInputError& error) {
+    throw CliError(error.what());
+  }
   if (!spec.save_index_path.empty()) {
     if (!spec.reference_index_path.empty()) throw CliError("--save and --reference-index are mutually exclusive");
     ValidateOutputParent(spec.save_index_path);
     std::vector<std::filesystem::path> protected_paths{spec.reference_path, spec.query_path};
+    if (!spec.centromere.reference_bed.empty()) protected_paths.push_back(spec.centromere.reference_bed);
+    if (!spec.centromere.query_bed.empty()) protected_paths.push_back(spec.centromere.query_bed);
     for (const auto* suffix : {".sam", ".paf", ".delta", ".maf", ".chain"}) {
       protected_paths.emplace_back(spec.output_prefix.string() + suffix);
     }
@@ -624,7 +665,7 @@ void ValidateRunSpec(const RunSpec& spec) {
   if (spec.alignment.break_length == 0) throw CliError("--break-length must be at least 1");
   if (spec.alignment.diag_factor < 0.0) throw CliError("--diag-factor must be non-negative");
   if (spec.alignment.max_dp_cells == 0) throw CliError("--max-dp-cells must be at least 1");
-  if (spec.formats.delta) {
+  if (spec.formats.delta && !(spec.centromere.whole_input && CentromereCliAnchorsOnly())) {
     const auto contains_whitespace = [](const std::filesystem::path& path) {
       const auto text = AbsoluteForDisplay(path);
       return std::any_of(text.begin(), text.end(), [](unsigned char value) {
@@ -659,6 +700,9 @@ RunSpec BatchQuerySpec(const BatchSpec& spec, const BatchQuery& query) {
 }
 
 void ValidateBatchSpec(const BatchSpec& spec) {
+  if (spec.common.centromere.Mode() != CentromereMode::Genome) {
+    throw CliError("centromere options are supported only by align");
+  }
   if (spec.output_dir.empty()) throw CliError("batch requires --output-dir");
   if (spec.queries.empty()) throw CliError("batch requires at least one query");
   if (!spec.common.outputs.empty() || !spec.common.output_prefix.empty()) throw CliError("batch output paths are generated from --output-dir");
@@ -766,6 +810,22 @@ Alignment I/O:
   --formats LIST            Legacy comma list (default: sam,paf,delta)
   --work-dir PATH           Run-local workspace
 
+Centromere input (align only; source-derived RaMA + WFA2 on Linux):
+  -c, --centromere          Process exactly one nonempty sequence per input
+  --ref-cen BED             Centromere intervals in the full reference genome
+  --query-cen BED           Centromere intervals in the full query genome
+  Long aliases: --reference-centromeres, --query-centromeres
+  Both BEDs are required together; cannot combine with -c. BED is zero-based,
+  half-open, with >=3 columns and optional names. No automatic region detection.
+  --print-effective-config validates this interface without running alignment.
+  -c uses supplied orientation, fixed RaMA rules, and deterministic N mismatches.
+  Default development build: anchors only; use --output-prefix for two TSV files.
+  Check --print-effective-config for centromere_stage; no WFA in anchors-only mode.
+  With -c only, omitted --work-dir defaults to .ramag-work beside the output.
+  Experimental direction builds export candidate evidence, not confirmed inversions.
+  Genome tuning/index options are incompatible with -c.
+  BED mixed alignment remains unsupported; it does not fall back to genome mode.
+
 Core options:
   --threads N               Worker budget (default: 1)
   --progress auto|on|off    Terminal progress (default: auto)
@@ -809,8 +869,121 @@ std::string VersionText() {
 std::string EffectiveConfigText(const RunSpec& spec) {
   const auto openmp = CurrentOpenMpRuntimeInfo();
   std::ostringstream output;
+  if (spec.centromere.whole_input) {
+    const auto count_options=CentromereCliBlockOptions();
+    const bool count_mode=count_options.planning_strategy==CentromereBlockStrategy::CountClusterDirectionsV8;
+    const bool orientation_mode=count_options.planning_strategy==CentromereBlockStrategy::OrientationEvidenceV9;
+    const bool evidence_mode=count_mode || orientation_mode;
+    output << "command=align\nalignment_core=rama-centromere\ncentromere_mode=centromere-only\n"
+           << "centromere_backend=" << (CentromereBackendAvailable() ? "available" : "not-built") << '\n'
+           << "rama_source_commit=7bc89c4902bc9254f18cc4b05c4bf491a10bd7cb\n"
+           << "wfa2_commit=99a5879a3a2972eff168cbcc6610b6cf02844ed0\n"
+           << "centromere_stage=" << (orientation_mode ? "orientation-evidence-v9" : count_mode ? "count-direction-evidence" : CentromereCliBlocks() ? CentromereBlockStrategyName(CentromereCliBlockOptions().planning_strategy) : CentromereCliDirections() ? "direction-evidence" : CentromereCliAnchorsOnly() ? "anchors-only" : "complete-alignment") << '\n'
+           << "wfa_execution=" << (CentromereCliAnchorsOnly() ? "disabled" : "enabled") << '\n'
+           << "alignment_scope=" << (evidence_mode ? "direction-evidence-no-alignment" : CentromereCliBlocks() ? "fixed-direction-partitioned-pair" : CentromereCliAnchorsOnly() ? "sparse-exact-anchors" : "single-pair-end-to-end") << '\n'
+           << "orientation=" << (orientation_mode ? "v6-plus-query-only-evidence-unresolved-reference-copy" : count_mode ? "joint-local-count-clusters" : CentromereCliBlocks() ?
+              (CentromereCliBlockOptions().planning_strategy!=CentromereBlockStrategy::InitialDirectionBlocksV1 ? "joint-local-direction-and-correspondence" : "initial-both-then-fixed-blocks") :
+              CentromereCliDirections() ? "independent-forward-and-reverse" : "supplied-forward") << '\n'
+           << "centromere_inversion_detection=" << (evidence_mode ? "experimental-direction-evidence" : CentromereCliBlocks() ? "preliminary-fixed-blocks" : CentromereCliDirections() ? "experimental-anchor-evidence" : "disabled") << '\n'
+           << "rare_match_max_count=100\n"
+           << "extension_scoring=dual-affine;match=0;mismatch=3;open1=4;extend1=2;open2=12;extend2=1\n"
+           << "wfa_memory=medium\nwfa_heuristic=wfadaptive:10:50:1\n"
+           << "ambiguous_bases=N;hard-break-anchors;paired-N-is-mismatch\n"
+           << "reference=" << AbsoluteForDisplay(spec.reference_path) << '\n'
+           << "query=" << AbsoluteForDisplay(spec.query_path) << '\n'
+           << "output_prefix=" << AbsoluteForDisplay(spec.output_prefix) << '\n'
+           << "threads=" << spec.threads << "\nformats="
+           << (orientation_mode ? "initial-anchors.tsv,root-candidates.tsv,blocks.tsv,planning-anchors.tsv,orientation-windows.tsv,orientation-evidence.tsv,orientation-sources.tsv,orientation-gaps.tsv,orientation-unknown.tsv" : count_mode ? "initial-anchors.tsv,root-candidates.tsv,blocks.tsv,planning-anchors.tsv,count-windows.tsv,count-nodes.tsv,count-candidates.tsv,count-gaps.tsv,supported-intervals.tsv,direction-regions.tsv" : CentromereCliDirections() ? "direction-anchors.tsv,direction-regions.tsv,direction-chains.tsv,direction-tasks.tsv,inversion-candidates.tsv" : CentromereCliAnchorsOnly() ? "initial-anchors.tsv,final-anchors.tsv" : spec.formats.ToString()) << '\n'
+           << "work_dir=" << AbsoluteForDisplay(spec.work_dir) << '\n';
+    if(orientation_mode && count_options.orientation_audit_known_blocks)
+      output<<"orientation_audit_outputs=orientation-block-audit.tsv,orientation-known-blocks.tsv\n"
+        <<"orientation_known_view="<<(count_options.repair_inherited_directions?
+          "orientation-local-direction-repair-intervals.tsv;prior-direction-views-and-raw-blocks-are-provenance":count_options.review_known_block_counterchains?
+          "orientation-known-counterchain-intervals.tsv;orientation-known-blocks.tsv-and-raw-blocks-are-provenance":
+          "orientation-known-blocks.tsv;raw-blocks-are-provenance")<<'\n';
+    if(orientation_mode && count_options.repair_inherited_directions)
+      output<<"orientation_local_direction_repair_policy="<<(count_options.repair_drift_consistent_gaps?
+          "single-pass-drift-consistent-root-competition-v2":"single-pass-frozen-root-competition-v1")<<'\n'
+        <<"orientation_local_direction_repair_outputs=orientation-local-direction-repair-reviews.tsv,orientation-local-direction-repair-witnesses.tsv,orientation-local-direction-repair-intervals.tsv,orientation-local-direction-repair-changes.tsv\n";
+    if(orientation_mode && count_options.review_known_block_counterchains)
+      output<<"orientation_known_counterchain_policy=final-local-opposite-chain-retraction-v1\n"
+        <<"orientation_known_counterchain_outputs=orientation-known-counterchain-reviews.tsv,orientation-known-counterchain-witnesses.tsv,orientation-known-counterchain-intervals.tsv\n";
+    if(orientation_mode && count_options.recover_long_gap_ends)
+      output<<"orientation_long_gap_outputs=orientation-long-gap-ends.tsv,orientation-long-gap-gaps.tsv\n";
+    if(orientation_mode && count_options.recover_sparse_pivots)
+      output<<"orientation_sparse_outputs=orientation-sparse-pivots.tsv,orientation-sparse-gaps.tsv,orientation-sparse-sources.tsv\n";
+    if(orientation_mode && count_options.recover_short_gap_ends)
+      output<<"orientation_short_gap_outputs=orientation-short-gap-ends.tsv,orientation-short-gap-gaps.tsv\n";
+    if(orientation_mode && count_options.recover_mixed_gap_ends)
+      output<<"orientation_mixed_gap_outputs=orientation-mixed-gap-ends.tsv,orientation-mixed-gap-gaps.tsv\n";
+    if(orientation_mode && count_options.recover_sparse_gap_ends)
+      output<<"orientation_sparse_gap_outputs=orientation-sparse-gap-ends.tsv,orientation-sparse-gap-gaps.tsv\n";
+    if(orientation_mode && count_options.unify_real_anchor_ends)
+      output<<"orientation_unified_outputs=orientation-unified-pivots.tsv,orientation-unified-proposals.tsv,orientation-unified-ends.tsv\n";
+    if(evidence_mode)output<<"block_planning_strategy="<<CentromereBlockStrategyName(count_options.planning_strategy)<<"\ndirection_recursion=disabled\n"
+      <<"count_window="<<count_options.count_window<<"\ncount_step="<<count_options.count_step
+      <<"\ncount_min_anchors="<<count_options.count_min_anchors<<"\ncount_dominance_ratio="<<count_options.count_dominance_ratio
+      <<"\ncount_cluster_gap="<<count_options.count_cluster_gap<<"\ncount_inferred_gap="<<count_options.count_inferred_gap
+      <<"\nblock_planning_memory_bytes="<<count_options.planner_memory_limit_bytes<<'\n';
+    if(orientation_mode)output<<"orientation_length_ratio="<<count_options.count_dominance_ratio
+      <<"\norientation_connection_policy="<<(count_options.orientation_bridge_unknown_gaps?"same-direction-unknown-gap-v1":count_options.orientation_connected_gaps?"continuous-windows-known-pivots-v1":"single-window-v9")
+      <<"\norientation_audit_policy="<<(count_options.orientation_audit_known_blocks?"opposite-window-old-gap-v1":"disabled")
+      <<"\norientation_long_gap_policy="<<(count_options.recover_long_gap_ends?"bounded-pure-window-endpoints-v1":"disabled")
+      <<"\norientation_sparse_policy="<<(count_options.recover_sparse_pivots?"frozen-sparse-root-pivots-v1":"disabled")
+      <<"\norientation_short_gap_policy="<<(count_options.recover_short_gap_ends?"bounded-short-pure-window-ends-v1":"disabled")
+      <<"\norientation_mixed_gap_policy="<<(count_options.recover_mixed_gap_ends?"bounded-opposite-direction-pure-window-ends-v1":"disabled")
+      <<"\norientation_sparse_gap_policy="<<(count_options.recover_sparse_gap_ends?"bounded-frozen-sparse-root-gap-ends-v1":"disabled")
+      <<"\norientation_scope="<<(count_options.orientation_audit_known_blocks?"v6-query-evidence-with-old-block-audit":"v6-unknown-query-only")
+      <<"\nreference_copy=unresolved\n";
+    if(orientation_mode && count_options.prefer_stronger_sparse_gap_end)
+      output<<"orientation_sparse_gap_meeting_policy=stronger-frozen-accepted-root-v1\n";
+    if(orientation_mode && count_options.unify_real_anchor_ends)
+      output<<"orientation_unified_policy=frozen-real-anchor-ends-v1\n";
+    if(orientation_mode && count_options.review_local_competitive_gaps)
+      output<<"orientation_local_review_policy=same-direction-original-corridor-v1\n"
+        <<"orientation_local_review_outputs=orientation-local-reviews.tsv,orientation-local-gaps.tsv\n";
+    if(orientation_mode && count_options.review_collinear_fragment_connections)
+      output<<"orientation_collinear_review_policy=two-flank-collinear-witness-v1\n"
+        <<"orientation_collinear_review_outputs=orientation-collinear-reviews.tsv,orientation-collinear-counters.tsv,orientation-collinear-witnesses.tsv,orientation-collinear-gaps.tsv\n";
+    if(orientation_mode && count_options.review_collinear_window_gaps)
+      output<<"orientation_collinear_window_policy=positive-window-break-full-audit-v1\n";
+    if(orientation_mode && count_options.review_neutral_window_gaps)
+      output<<"orientation_neutral_window_policy=bounded-uncontested-window-full-review-v1\n";
+    if(orientation_mode && count_options.review_alternate_original_endpoints)
+      output<<"orientation_alternate_endpoint_policy=bounded-original-endpoint-full-review-v1\n"
+        <<"orientation_alternate_endpoint_outputs=orientation-alternate-reviews.tsv,orientation-alternate-counters.tsv,orientation-alternate-witnesses.tsv,orientation-alternate-gaps.tsv\n";
+    if(orientation_mode && count_options.review_isolated_opposite_anchors)
+      output<<"orientation_isolated_review_policy=bounded-contextual-opposite-v1\n"
+        <<"orientation_isolated_review_outputs=orientation-isolated-reviews.tsv,orientation-opposite-reviews.tsv,orientation-isolated-gaps.tsv\n";
+    if (CentromereCliBlocks()) {
+      const auto budgets=CentromereCliBlockOptions();
+      output << "wfa_gap_memory_bytes=" << budgets.wfa_memory_limit_bytes
+             << "\nblock_planning_strategy=" << CentromereBlockStrategyName(budgets.planning_strategy)
+             << "\nblock_planning_memory_bytes=" << budgets.planner_memory_limit_bytes
+             << "\nunknown_direction=" << (budgets.planning_strategy!=CentromereBlockStrategy::InitialDirectionBlocksV1 ? "unresolved-no-wfa" : "background-fallback")
+             << "\nwfa_gap_seconds=" << budgets.wfa_seconds_limit
+             << "\nblock_alignment_seconds=" << budgets.alignment_seconds_limit
+             << "\nwfa_workers=1\npartial_exit_code=9\npartial_suffix=.partial\n";
+    }
+    if (CentromereCliDirections())
+      output << "direction_objective=effective-collinear-length-v1\n"
+             << "direction_search_strategy=" << DirectionStrategyName(CentromereCliDirectionStrategy()) << '\n'
+             << "direction_supplemental_rare_levels="
+             << (CentromereCliDirectionStrategy()==DirectionSearchStrategy::LegacyMultiscale ? "true" : "false") << '\n'
+             << "direction_windows="
+             << (CentromereCliDirectionStrategy()==DirectionSearchStrategy::LegacyMultiscale ?
+               "80bp-doubling-half-step-reflection-symmetric" : "paired-chain-gaps-and-opposite-support-only") << '\n'
+             << "direction_recursion=both-directions\n"
+             << "direction_actual_workers=1\n"
+             << "direction_evidence_memory_guard_bytes=100000000000\n"
+             << "direction_breakpoints=uncertainty-intervals-not-base-resolved\n";
+    for (const auto& request:spec.outputs)
+      output << "output=" << AbsoluteForDisplay(request.path) << '\n';
+    return output.str();
+  }
   output << PairwiseConfigurationText(spec.alignment);
-  output << "alignment_core=pairwise\n"
+  output << "alignment_core="
+         << (spec.centromere.Mode() == CentromereMode::Genome ? "pairwise" : "centromere-backend-pending") << '\n'
          << "pairwise_source_commit=7d08359e0df7f7e6ffcfe67217c3399761cb2129\n"
          << "extension_scoring=scaled-HOXD70;gap-open=40;gap-extend=3\n"
          << "break_length_applicability=fixed-pairwise-200\n"
@@ -827,6 +1000,18 @@ std::string EffectiveConfigText(const RunSpec& spec) {
          << "query=" << AbsoluteForDisplay(spec.query_path) << '\n'
          << "output_prefix=" << AbsoluteForDisplay(spec.output_prefix) << '\n';
   for (const auto& request : spec.outputs) output << "output=" << AbsoluteForDisplay(request.path) << '\n';
+  if (spec.centromere.Mode() != CentromereMode::Genome) {
+    const auto annotations = LoadCentromereAnnotations(spec.centromere);
+    output << "centromere_mode=" << CentromereModeName(spec.centromere.Mode()) << '\n'
+           << "alignment_scope=" << (spec.centromere.whole_input ? "all-input-records" : "whole-genome-with-specialised-regions") << '\n'
+           << "reference_centromeres=" << AbsoluteForDisplay(spec.centromere.reference_bed) << '\n'
+           << "query_centromeres=" << AbsoluteForDisplay(spec.centromere.query_bed) << '\n'
+           << "reference_centromere_regions=" << annotations.reference.size() << '\n'
+           << "query_centromere_regions=" << annotations.query.size() << '\n'
+           << "centromere_pairing=not-inferred-from-BED-order-or-names\n"
+           << "centromere_backend=not-integrated\n"
+           << "centromere_inversion_detection=not-integrated\n";
+  }
   output << "work_dir=" << AbsoluteForDisplay(spec.work_dir) << '\n'
          << "threads=" << spec.threads << '\n'
          << "openmp_enabled=" << (openmp.enabled ? "true" : "false") << '\n'

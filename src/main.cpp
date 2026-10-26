@@ -165,15 +165,15 @@ int main(int argc, char** argv) {
       std::cout << ramag::EffectiveConfigText(parsed.run_spec);
       return 0;
     }
+    ramag::RequireCentromereBackend(parsed.run_spec.centromere);
     logger = std::make_unique<ramag::RunLogger>(parsed.run_spec.work_dir);
     logger->Info(ramag::VersionText(), false);
     logger->Info(ramag::EffectiveConfigText(parsed.run_spec), false);
     logger->Info("invocation=" + Invocation(argc, argv), false);
     const auto outcome = ramag::RunAlignmentPipeline(
         parsed.run_spec, Invocation(argc, argv), binary_path, logger.get());
-    (void)outcome;
     logger->Flush();
-    return 0;
+    return outcome.exit_code;
   } catch (const std::exception& error) {
     const int code = ramag::FailureExitCode(error);
     const std::string message = "status=" + std::string(dynamic_cast<const ramag::InterruptedError*>(&error) ? "interrupted" : "failed") + " exit_code=" + std::to_string(code) + " message=" + error.what();

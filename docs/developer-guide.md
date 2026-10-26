@@ -25,6 +25,22 @@ consumption, bounds and nonzero operations are checked.
 
 ## Input and dependencies
 
+Centromere declarations are held in `RunSpec::centromere`; the separate
+`centromere.hpp` module parses BED, validates sequence bounds without copying
+sequence data, and distinguishes whole-input from annotated-genome scope.
+Both the CLI and `RunAlignmentPipeline()` check backend readiness before
+starting alignment. The default CLI calls `FindCentromereAnchors()` and stops
+before gap alignment. `AlignCentromeres()` retains the complete single-pair
+library route independently of Sufkit/KSW2. BED mixed mode and builds without the backend
+raise `DependencyError` rather than falling back to pairwise. Parsing and
+`--print-effective-config` remain usable. See the
+[input contract](centromere-interface.md) for the exact options and limitations.
+
+The installed `RaMAG::centromere` target is discovered with
+`find_package(RaMAGCentromere CONFIG REQUIRED)`; it needs no host logger, signal
+handler or affinity changes. See [the integration notes](centromere-rama-integration.md)
+for source-derived algorithm rules, callback ownership and safety patches.
+
 The validated read callback checks raw decompressed bytes before kseq can skip
 invalid FASTA or accept FASTQ. It tracks line state and a bounded read-ahead queue
 of complete headers, preserving descriptions independently of kseq tokenization.

@@ -1,5 +1,12 @@
 # RaMA-G user guide
 
+For centromere input declarations within `align`, see the
+[centromere interface](centromere-interface.md). Linux `align -c` currently
+exports initial/final RaMA anchors for a single sequence pair using
+`--output-prefix`; the default development route does not execute WFA.
+Inversion interpretation
+and BED mixed alignment are not integrated.
+
 ## Purpose and installation
 
 RaMA-G performs assembly-to-assembly nucleotide alignment. The reference is the

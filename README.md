@@ -18,6 +18,16 @@ and the [developer guide](docs/developer-guide.md) for the algorithms and librar
 
 See the [changelog](CHANGELOG.md) for release and compatibility notes.
 
+The [centromere backend](docs/centromere-interface.md) keeps the `align` command:
+`align -c` currently exports source-derived RaMA rare anchors for exactly one
+nonempty reference sequence against one query sequence in the supplied
+orientation. Use `--output-prefix`: initial and final anchor TSVs are published.
+The default development build stops before WFA; no complete alignment or
+inversion search is performed. The complete library backend remains available
+for later integration but is not called by this anchor-only CLI route.
+`--ref-cen BED --query-cen BED` still validates annotated inputs but mixed
+whole-genome/centromere alignment remains unsupported.
+
 The opt-in [coverage-40-500 profile](docs/coverage-profile.md) reproduces the
 B+D+C+S+E build with explicit `--min-cluster 40 --max-gap 500` run parameters.
 The previous coverage-50-250 preset remains available. Ordinary defaults remain
@@ -50,7 +60,9 @@ Batch defaults to PAF, records outcomes in `results/batch.tsv`, and continues
 after ordinary query failures. Its index stays resident between queries; peak
 memory can exceed a standalone alignment. See the [batch guide](docs/user-guide.md#batch-queries).
 
-Sufkit is fetched at an exact commit during configuration. KSW2, kseq and spdlog
+Sufkit and WFA2 are fetched at exact commits during configuration. The centromere
+backend is enabled by default on Linux; use `-DRAMAG_ENABLE_CENTROMERE=OFF` for a
+genome-only build without WFA2. Source-derived RaMA, KSW2, kseq and spdlog
 are vendored. The `cmake/` directory is required source, not a build artifact.
 Production builds do not require the internal `tests/` or `plan/` directories.
 

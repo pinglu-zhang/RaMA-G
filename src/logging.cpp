@@ -53,7 +53,7 @@ int FailureExitCode(const std::exception& error) noexcept {
   if (const auto* e = dynamic_cast<const InterruptedError*>(&error)) return e->ExitCode();
   if (dynamic_cast<const UnsupportedSeedMode*>(&error) || dynamic_cast<const UnsupportedFastaFormat*>(&error)) return 4;
   if (dynamic_cast<const CliError*>(&error)) return 2;
-  if (dynamic_cast<const FastaError*>(&error)) return 3;
+  if (dynamic_cast<const FastaError*>(&error) || dynamic_cast<const CentromereInputError*>(&error)) return 3;
   if (dynamic_cast<const DependencyError*>(&error)) return 5;
   if (dynamic_cast<const WriterError*>(&error)) return 7;
   if (dynamic_cast<const AlignmentError*>(&error) || dynamic_cast<const std::bad_alloc*>(&error)) return 6;

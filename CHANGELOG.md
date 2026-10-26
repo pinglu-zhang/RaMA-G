@@ -2,6 +2,12 @@
 
 ## Unreleased changes
 
+- Add the source-derived RaMA centromere backend, anchor-only CLI export,
+  installed centromere library, and opt-in direction-region planning and repair.
+  Experimental direction options remain disabled by default.
+- Support strict genome-only builds with the centromere backend disabled;
+  unavailable centromere APIs report a dependency error.
+
 - Add `ramag batch` with repeated query paths or a named seqfile, one shared
   reference/index initialization, serial queries, PAF by default and per-query
   transactional output. Ordinary query failures do not prevent later queries;

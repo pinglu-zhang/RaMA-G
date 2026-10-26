@@ -14,6 +14,7 @@ class RunLogger;
 struct RunOutcome {
   OutputPaths paths;
   RunStatistics statistics;
+  int exit_code{};
 };
 
 struct BatchQueryOutcome {

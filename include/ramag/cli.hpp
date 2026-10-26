@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ramag/alignment.hpp"
+#include "ramag/centromere.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -51,6 +52,7 @@ struct RunSpec {
   FormatSelection formats{};
   ProgressOptions progress{};
   AlignmentOptions alignment{};
+  CentromereSpec centromere{};
 };
 
 struct IndexSpec {
