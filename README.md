@@ -18,15 +18,22 @@ and the [developer guide](docs/developer-guide.md) for the algorithms and librar
 
 See the [changelog](CHANGELOG.md) for release and compatibility notes.
 
-The [centromere backend](docs/centromere-interface.md) keeps the `align` command:
-`align -c` currently exports source-derived RaMA rare anchors for exactly one
-nonempty reference sequence against one query sequence in the supplied
-orientation. Use `--output-prefix`: initial and final anchor TSVs are published.
-The default development build stops before WFA; no complete alignment or
-inversion search is performed. The complete library backend remains available
-for later integration but is not called by this anchor-only CLI route.
-`--ref-cen BED --query-cen BED` still validates annotated inputs but mixed
-whole-genome/centromere alignment remains unsupported.
+On Linux, `ramag align -c` aligns one centromere FASTA record per input.
+It predicts query directions, searches recursively for RaMA anchors and copy
+branches, reviews local paths, and aligns supported internal gaps with
+`centrolign-3piece` scoring.
+
+```bash
+./build/ramag align -c --reference reference.fa --query query.fa \
+  --output-prefix comparison
+```
+
+The command exports **SAM, PAF and MAF** together with direction, anchor, copy,
+segment and gap TSVs. Use `--formats paf` to select only PAF among the standard
+formats. Unresolved regions are recorded in the TSVs. Mixed alignment with
+`--ref-cen BED --query-cen BED` still requires a separate backend integration.
+See the [centromere interface](docs/centromere-interface.md) and the
+[alignment format contract](docs/centromere-alignment-formats.md).
 
 The opt-in [coverage-40-500 profile](docs/coverage-profile.md) reproduces the
 B+D+C+S+E build with explicit `--min-cluster 40 --max-gap 500` run parameters.

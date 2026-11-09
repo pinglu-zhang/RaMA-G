@@ -1,11 +1,8 @@
 # RaMA-G user guide
 
-For centromere input declarations within `align`, see the
-[centromere interface](centromere-interface.md). Linux `align -c` currently
-exports initial/final RaMA anchors for a single sequence pair using
-`--output-prefix`; the default development route does not execute WFA.
-Inversion interpretation
-and BED mixed alignment are not integrated.
+Linux `ramag align -c` aligns one centromere FASTA record per side.
+It predicts directions and produces path-aware SAM, PAF and MAF plus diagnostic
+TSVs. See the [centromere interface](centromere-interface.md).
 
 ## Purpose and installation
 

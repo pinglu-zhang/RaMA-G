@@ -248,6 +248,16 @@ if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/t
   ramag_apply_project_warnings(ramag_unit_tests)
   add_test(NAME ramag.unit COMMAND ramag_unit_tests)
 
+  # Format conversion is independent of the optional computation backend.
+  add_executable(ramag_centromere_stitch_formats_tests tests/centromere_stitch_formats_tests.cpp)
+  target_link_libraries(ramag_centromere_stitch_formats_tests PRIVATE RaMAG::centromere)
+  ramag_apply_project_warnings(ramag_centromere_stitch_formats_tests)
+  if(RAMAG_ENABLE_SANITIZERS AND NOT MSVC)
+    target_compile_options(ramag_centromere_stitch_formats_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(ramag_centromere_stitch_formats_tests PRIVATE -fsanitize=address,undefined)
+  endif()
+  add_test(NAME ramag.centromere.stitch_formats COMMAND ramag_centromere_stitch_formats_tests)
+
   add_executable(ramag_centromere_interface_tests tests/centromere_interface_tests.cpp)
   if(RAMAG_ENABLE_CENTROMERE)
     include(cmake/RaMACentromereTests.cmake)

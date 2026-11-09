@@ -1,6 +1,11 @@
+#include "ramag/centromere_endpoint_refinement.hpp"
 #include "ramag/pipeline.hpp"
 #include "ramag/centromere_direction.hpp"
 #include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere_directed_anchors.hpp"
+#include "ramag/centromere_copy_anchors.hpp"
+#include "ramag/centromere_stitch.hpp"
+#include "ramag/centromere_stitch_formats.hpp"
 #include "ramag/pairwise_core.hpp"
 
 #include "ramag/alignment.hpp"
@@ -354,6 +359,43 @@ void EnsureTargetsAbsent(const RunSpec& spec, const OutputPaths& paths) {
   }
 }
 
+CentromereBlockOptions DefaultCentromereDirectionOptions(
+    const CentromereAlignmentOptions& alignment) {
+  CentromereBlockOptions options;
+  static_cast<CentromereAlignmentOptions&>(options) = alignment;
+  // The direction profile used with the full alignment regression.
+  options.planning_strategy = CentromereBlockStrategy::OrientationEvidenceV9;
+  options.direction_island_audit = true;
+  options.direction_island_context_review = true;
+  options.direction_plan_review = true;
+  options.overlap_compatibility = true;
+  options.orientation_audit_known_blocks = true;
+  options.orientation_bridge_unknown_gaps = true;
+  options.orientation_connected_gaps = true;
+  options.prefer_stronger_sparse_gap_end = true;
+  options.recover_long_gap_ends = true;
+  options.recover_mixed_gap_ends = true;
+  options.recover_short_gap_ends = true;
+  options.recover_sparse_gap_ends = true;
+  options.recover_sparse_pivots = true;
+  options.repair_drift_consistent_gaps = true;
+  options.repair_inherited_directions = true;
+  options.review_alternate_original_endpoints = true;
+  options.review_collinear_fragment_connections = true;
+  options.review_collinear_window_gaps = true;
+  options.review_gap_interior_opposition = true;
+  options.review_isolated_opposite_anchors = true;
+  options.review_known_block_counterchains = true;
+  options.review_local_competitive_gaps = true;
+  options.review_neutral_window_gaps = true;
+  options.review_region_chains = true;
+  options.review_unified_gaps = true;
+  options.supplement_region_anchors = true;
+  options.unify_real_anchor_ends = true;
+  options.unified_search_input_budget = 13'335'649;
+  return options;
+}
+
 void VerifyPublishedArtifact(const ArtifactReport& artifact) {
   std::error_code error;
   const auto bytes = std::filesystem::file_size(artifact.path, error);
@@ -390,7 +432,8 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
     if(logger)logger->Info(spec.centromere.whole_input ? EffectiveConfigText(spec) :
                           PairwiseConfigurationText(spec.alignment),false);
     EnsureDirectory(spec.output_prefix.parent_path(), "output directory");
-    if (!(spec.centromere.whole_input && CentromereCliAnchorsOnly()))
+    if (!(spec.centromere.whole_input && (CentromereCliAnchorsOnly() ||
+          CentromereCliFullAlignment())))
       EnsureTargetsAbsent(spec, paths);
     std::map<std::string, double> timings;
     stage = "input";
@@ -468,6 +511,378 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
       cen_options.worker_threads=spec.threads;
       cen_options.progress_callback=alignment_options.progress_callback;
       cen_options.interruption_callback=alignment_options.interruption_callback;
+      if (CentromereCliFullAlignment()) {
+        using Export = void(*)(std::ostream&, const CentromereDirectedAnchorResult&);
+        const std::vector<std::pair<const char*, Export>> exports{
+          {".directed-regions.tsv", WriteCentromereDirectedRegions},
+          {".initial-anchors.tsv", WriteCentromereDirectedInitialAnchors},
+          {".final-anchors.tsv", WriteCentromereDirectedFinalAnchors},
+          {".recursion.tsv", WriteCentromereDirectedTrace},
+          {".unanchored.tsv", WriteCentromereDirectedUncovered},
+          {".reference-overlaps.tsv", WriteCentromereDirectedReferenceOverlaps},
+          {".anchor-summary.tsv", WriteCentromereDirectedSummary},
+          {".full-reference-initial-anchors.tsv", WriteCentromereDirectedFullReferenceInitialAnchors}};
+        using CopyExport = void(*)(std::ostream&, const CentromereCopyAnchorResult&);
+        const std::vector<std::pair<const char*, CopyExport>> copy_exports{
+          {".copy-anchors.tsv", WriteCentromereCopyAnchors},
+          {".copy-ambiguities.tsv", WriteCentromereCopyAmbiguities},
+          {".copy-self-repeats.tsv", WriteCentromereCopySelfRepeats},
+          {".copy-tasks.tsv", WriteCentromereCopyTasks},
+          {".copy-summary.tsv", WriteCentromereCopySummary}};
+        using StitchExport = void(*)(std::ostream&, const CentromereStitchResult&);
+        const std::vector<std::pair<const char*, StitchExport>> stitch_exports{
+          {".alignment-segments.tsv", WriteCentromereStitchSegments},
+          {".alignment-gaps.tsv", WriteCentromereStitchGaps},
+          {".alignment-summary.tsv", WriteCentromereStitchSummary}};
+        using DirectionExport = void(*)(std::ostream&, const CentromereBlockResult&);
+        const std::array<std::pair<const char*, DirectionExport>, 2> direction_exports{{
+          {".orientation-local-direction-repair-intervals.tsv", WriteCentromereLocalDirectionRepairIntervals},
+          {".direction-initial-anchors.tsv", WriteCentromereInitialAnchors}}};
+        std::vector<std::filesystem::path> targets;
+        for (const auto& item : exports)
+          targets.emplace_back(spec.output_prefix.string() + item.first);
+        for (const auto& item : copy_exports)
+          targets.emplace_back(spec.output_prefix.string() + item.first);
+        const auto stitch_offset = targets.size();
+        for (const auto& item : stitch_exports)
+          targets.emplace_back(spec.output_prefix.string() + item.first);
+        using StandardExport = void(*)(std::ostream&, const SequenceRecord&,
+                                        const SequenceRecord&, const CentromereStitchResult&);
+        std::vector<std::pair<std::filesystem::path, StandardExport>> standard_exports;
+        if (spec.formats.sam) standard_exports.emplace_back(paths.sam, WriteCentromereStitchSam);
+        if (spec.formats.paf) standard_exports.emplace_back(paths.paf, WriteCentromereStitchPaf);
+        if (spec.formats.maf) standard_exports.emplace_back(paths.maf, WriteCentromereStitchMaf);
+        const auto standard_offset = targets.size();
+        for (const auto& item : standard_exports) targets.push_back(item.first);
+        const auto endpoint_offset = targets.size();
+        for (const auto* suffix : {".unrefined-initial-anchors.tsv", ".unrefined-final-anchors.tsv", ".endpoint-reviews.tsv"})
+          targets.emplace_back(spec.output_prefix.string() + suffix);
+        const auto block_offset = targets.size();
+        for (const auto* suffix : {".preblock-initial-anchors.tsv", ".preblock-final-anchors.tsv", ".block-reviews.tsv", ".preblock-alignment-segments.tsv"})
+          targets.emplace_back(spec.output_prefix.string() + suffix);
+        const auto cross_offset = targets.size();
+        for (const auto* suffix : {".precross-initial-anchors.tsv", ".precross-final-anchors.tsv", ".cross-region-reviews.tsv", ".precross-alignment-segments.tsv"})
+          targets.emplace_back(spec.output_prefix.string() + suffix);
+        const auto joint_offset = targets.size();
+        for (const auto* suffix : {".prejoint-initial-anchors.tsv", ".prejoint-final-anchors.tsv", ".joint-path-reviews.tsv", ".prejoint-alignment-segments.tsv", ".prejoint-directed-regions.tsv", ".prejoint-recursion.tsv"})
+          targets.emplace_back(spec.output_prefix.string() + suffix);
+        const auto unplanned_offset = targets.size();
+        targets.emplace_back(spec.output_prefix.string() + ".unplanned-core-reviews.tsv");
+        const auto direction_offset = targets.size();
+        for (const auto& item : direction_exports)
+          targets.emplace_back(spec.output_prefix.string() + item.first);
+        targets.emplace_back(spec.output_prefix.string() + ".directed-run.tsv");
+        for (const auto& target : targets)
+          if (std::filesystem::symlink_status(target).type() != std::filesystem::file_type::not_found)
+            throw WriterError("refusing to overwrite centromere output: " + target.string());
+
+        const auto& r = reference.sequences.front();
+        const auto& q = query.sequences.front();
+        TemporaryFiles temporary;
+        const auto direction_plan = TemporarySibling(targets[direction_offset], run_id);
+        const auto initial_evidence = TemporarySibling(targets[direction_offset + 1], run_id);
+        stage = "centromere-direction-plan";
+        progress.Stage(stage);
+        const auto direction_begin = Clock::now();
+        {
+          const auto evidence = FindCentromereDirectionRegions(r, q,
+              DefaultCentromereDirectionOptions(cen_options));
+          if (!evidence.complete || evidence.wfa_calls != 0 || !evidence.refined.empty() ||
+              !evidence.alignment.alignments.empty() || evidence.refinement_searches != 0)
+            throw AlignmentError("centromere direction prediction did not complete independently of alignment");
+          for (std::size_t i = 0; i < direction_exports.size(); ++i) {
+            CheckInterruption("centromere-direction-export");
+            const auto tmp = TemporarySibling(targets[direction_offset + i], run_id);
+            temporary.Add(tmp);
+            WriteFile(tmp, [&](std::ostream& out) { direction_exports[i].second(out, evidence); });
+          }
+        }
+        const double direction_seconds = SecondsBetween(direction_begin, Clock::now());
+        const auto directions = ReadCentromereDirectedRegions(direction_plan);
+        auto anchors = FindCentromereAnchorsInDirections(r, q, directions, cen_options);
+        if (!anchors.complete || anchors.wfa_calls != 0)
+          throw AlignmentError("fixed-direction anchor stage did not complete without WFA");
+
+        stage = "copy-anchors";
+        progress.Stage(stage);
+        const auto copies = FindCentromereCopyAnchors(r, q, anchors, {}, cen_options);
+        if (!copies.complete || copies.wfa_calls != 0)
+          throw AlignmentError("copy anchor stage did not complete without WFA");
+
+        CentromereEndpointOptions review_options;
+        review_options.kernel.interruption_callback = alignment_options.interruption_callback;
+        stage = "endpoint-review";
+        progress.Stage(stage);
+        const auto raw_anchors = anchors;
+        auto endpoint_review = RefineCentromereRootEndpoints(r, q, anchors, &copies, review_options);
+        anchors = std::move(endpoint_review.anchors);
+
+        stage = "anchor-stitch";
+        progress.Stage(stage);
+        CentromereStitchOptions stitch_options;
+        stitch_options.progress_callback = alignment_options.progress_callback;
+        stitch_options.interruption_callback = alignment_options.interruption_callback;
+        // Retain diagnostic checkpoints even if final publication is aborted.
+        for (const auto& item : exports)
+          WriteFile(run_directory / (std::string("stitch-frozen") + item.first),
+            [&](std::ostream& out) { item.second(out, anchors); });
+        for (const auto& item : copy_exports)
+          WriteFile(run_directory / (std::string("stitch-frozen") + item.first),
+            [&](std::ostream& out) { item.second(out, copies); });
+        std::size_t stitch_observations = 0;
+        stitch_options.observation_callback = [&](const CentromereStitchResult& observed) {
+          if ((stitch_observations++ % 64) != 0 && !observed.complete && !observed.aborted) return;
+          for (const auto& item : stitch_exports) {
+            const auto target = run_directory / (std::string("stitch-snapshot") + item.first);
+            const auto temporary_snapshot = target.string() + ".pending";
+            WriteFile(temporary_snapshot, [&](std::ostream& out) { item.second(out, observed); });
+            std::filesystem::rename(temporary_snapshot, target);
+          }
+        };
+        auto stitched = AlignCentromereAnchoredPaths(r, q, anchors, &copies, stitch_options);
+
+        stage = "block-review";
+        progress.Stage(stage);
+        const auto preblock_anchors = anchors;
+        const auto preblock_stitched = stitched;
+        auto block_review = RefineCentromereAnchorBlocks(r, q, anchors, &copies, stitched, review_options);
+        if (block_review.accepted) {
+          anchors = std::move(block_review.anchors);
+          stage = "block-anchor-stitch";
+          progress.Stage(stage);
+          for (const auto& item : exports)
+            WriteFile(run_directory / (std::string("block-stitch-frozen") + item.first),
+              [&](std::ostream& out) { item.second(out, anchors); });
+          stitched = AlignCentromereAnchoredPaths(r, q, anchors, &copies, stitch_options);
+        }
+
+        stage = "cross-region-review";
+        progress.Stage(stage);
+        const auto precross_anchors = anchors;
+        const auto precross_stitched = stitched;
+        auto cross_review = RefineCentromereCrossRegionBlocks(r, q, anchors, &copies, stitched, review_options);
+        if (cross_review.accepted) {
+          anchors = std::move(cross_review.anchors);
+          stage = "cross-region-anchor-stitch";
+          progress.Stage(stage);
+          if (!cross_review.stitched)
+            throw AlignmentError("accepted cross-region review lacks validated stitch");
+          stitched = std::move(*cross_review.stitched);
+        }
+
+        stage = "joint-path-review";
+        progress.Stage(stage);
+        const auto prejoint_anchors = anchors;
+        const auto prejoint_stitched = stitched;
+        auto joint_review = RefineCentromereJointPaths(r, q, anchors, &copies, stitched, review_options);
+        if (joint_review.accepted) {
+          anchors = std::move(joint_review.anchors);
+          if (!joint_review.stitched) throw AlignmentError("accepted joint review lacks validated stitch");
+          stitched = std::move(*joint_review.stitched);
+        }
+
+        stage = "unplanned-core-review";
+        progress.Stage(stage);
+        CentromereEndpointResult unplanned_review;
+        {
+          auto options = review_options;
+          std::vector<SequenceRecord> search_reference;
+          std::optional<SufkitSeedIndex> search_index;
+          std::function<void()> check_search_build;
+          if (SufkitAdapterAvailable()) {
+            options.unplanned_candidates = [&](Position begin, Position end,
+                                                const std::function<void()> &check)
+                -> std::optional<std::vector<Seed>> {
+              const auto bytes = options.kernel.gap_memory_limit_bytes;
+              // Reserve separate shares for index construction, enumeration
+              // and the protected assembly. Large inputs retain the old plan.
+              if (r.size() > bytes / 1024 || end - begin > 65536) return std::nullopt;
+              try {
+                if (!search_index) {
+                  SufkitIndexOptions index_options;
+                  index_options.boundary_mem_occurrence_limit = 100000;
+                  index_options.mam_workspace_limit_bytes = bytes / 8;
+                  check_search_build = check;
+                  index_options.build_stage_context = &check_search_build;
+                  index_options.build_stage_callback = [](const char*, void *context) {
+                    (*static_cast<std::function<void()>*>(context))();
+                  };
+                  search_reference = {r};
+                  check();
+                  search_index.emplace(SufkitSeedIndex::Build(search_reference, index_options));
+                  check_search_build = {};
+                  if (search_index->BuildStatistics().resident_core_bytes > bytes / 8) {
+                    search_index.reset();
+                    return std::nullopt;
+                  }
+                  check();
+                }
+                AlignmentOptions search_options;
+                search_options.seed_mode = SeedMode::MumReference;
+                search_options.min_match = 128;
+                search_options.interruption_callback = [&](std::string_view) { check(); };
+                std::vector<SequenceRecord> query_window{
+                    {q.numeric_id, q.name, q.header, q.bases.substr(begin, end - begin)}};
+                auto found = search_index->Enumerate(search_reference, query_window, search_options);
+                check();
+                if (found.seeds.size() > 3000) return std::nullopt;
+                return std::move(found.seeds);
+              } catch (const std::bad_alloc&) {
+                check_search_build = {};
+                return std::nullopt;
+              } catch (const AlignmentError &error) {
+                check_search_build = {};
+                const std::string_view reason = error.what();
+                if (reason.starts_with("reference-MAM workspace ") ||
+                    reason.starts_with("reference-MAM boundary MEM occurrences exceed limit "))
+                  return std::nullopt;
+                throw;
+              }
+            };
+          }
+          unplanned_review = RecoverCentromereUnplannedCores(r, q, anchors, &copies, stitched,
+              initial_evidence, options);
+        }
+        if (unplanned_review.accepted) {
+          anchors = std::move(unplanned_review.anchors);
+          if (!unplanned_review.stitched)
+            throw AlignmentError("accepted unplanned core review lacks validated stitch");
+          stitched = std::move(*unplanned_review.stitched);
+        }
+        PublishedFiles published;
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+          stage = "directed-anchor-export";
+          CheckInterruption(stage);
+          const auto tmp = TemporarySibling(targets[i], run_id);
+          if (i >= direction_offset && i < direction_offset + direction_exports.size()) {
+            MaybeInjectWriterFailure("direction-evidence");
+            published.Add(tmp, targets[i]);
+            PublishNewFile(tmp, targets[i]);
+            continue;
+          }
+          temporary.Add(tmp);
+          WriteFile(tmp, [&](std::ostream& out) {
+            if (i < exports.size()) exports[i].second(out, anchors);
+            else if (i < exports.size() + copy_exports.size())
+              copy_exports[i - exports.size()].second(out, copies);
+            else if (i >= stitch_offset && i < stitch_offset + stitch_exports.size())
+              stitch_exports[i - stitch_offset].second(out, stitched);
+            else if (i >= standard_offset && i < standard_offset + standard_exports.size())
+              standard_exports[i - standard_offset].second(out, r, q, stitched);
+            else if (i >= endpoint_offset && i < endpoint_offset + 3) {
+              if (i == endpoint_offset) WriteCentromereDirectedInitialAnchors(out, raw_anchors);
+              else if (i == endpoint_offset + 1) WriteCentromereDirectedFinalAnchors(out, raw_anchors);
+              else WriteCentromereEndpointReviews(out, endpoint_review);
+            }
+            else if (i >= block_offset && i < block_offset + 4) {
+              if (i == block_offset) WriteCentromereDirectedInitialAnchors(out, preblock_anchors);
+              else if (i == block_offset + 1) WriteCentromereDirectedFinalAnchors(out, preblock_anchors);
+              else if (i == block_offset + 2) WriteCentromereEndpointReviews(out, block_review);
+              else WriteCentromereStitchSegments(out, preblock_stitched);
+            }
+            else if (i >= cross_offset && i < cross_offset + 4) {
+              if (i == cross_offset) WriteCentromereDirectedInitialAnchors(out, precross_anchors);
+              else if (i == cross_offset + 1) WriteCentromereDirectedFinalAnchors(out, precross_anchors);
+              else if (i == cross_offset + 2) WriteCentromereCrossRegionReviews(out, cross_review);
+              else WriteCentromereStitchSegments(out, precross_stitched);
+            }
+            else if (i >= joint_offset && i < joint_offset + 6) {
+              if (i == joint_offset) WriteCentromereDirectedInitialAnchors(out, prejoint_anchors);
+              else if (i == joint_offset + 1) WriteCentromereDirectedFinalAnchors(out, prejoint_anchors);
+              else if (i == joint_offset + 2) WriteCentromereCrossRegionReviews(out, joint_review);
+              else if (i == joint_offset + 3) WriteCentromereStitchSegments(out, prejoint_stitched);
+              else if (i == joint_offset + 4) WriteCentromereDirectedRegions(out, prejoint_anchors);
+              else WriteCentromereDirectedTrace(out, prejoint_anchors);
+            }
+            else if (i == unplanned_offset)
+              WriteCentromereCrossRegionReviews(out, unplanned_review);
+            else {
+              out << std::setprecision(std::numeric_limits<double>::max_digits10)
+                  << "field\tvalue\nstatus\t"
+                  << (!stitched.complete ? "partial" : "complete")
+                  << "\nwfa_calls\t0\n"
+                  << "source_commit\t" << RAMAG_GIT_COMMIT << '\n'
+                  << "version\t" << RAMAG_VERSION << '\n'
+                  << "orientation_model\torientation-evidence-v9\n"
+                  << "direction_plan\t" << std::filesystem::absolute(targets[direction_offset]).string() << '\n'
+                  << "direction_initial_anchors\t" << std::filesystem::absolute(targets[direction_offset + 1]).string() << '\n'
+                  << "direction_seconds\t" << direction_seconds << '\n'
+                  << "reference\t" << std::filesystem::absolute(spec.reference_path).string() << '\n'
+                  << "query\t" << std::filesystem::absolute(spec.query_path).string() << '\n'
+                  << "reference_length\t" << r.size() << "\nquery_length\t" << q.size()
+                  << "\nregions\t" << anchors.regions.size()
+                  << "\ninitial_anchors\t" << anchors.initial.size()
+                  << "\nfinal_anchors\t" << anchors.final.size()
+                  << "\nthreads\t" << spec.threads
+                  << "\nanchor_seconds\t" << anchors.total_seconds
+                  << "\nreference_scope\tforward-flanked-reverse-window-v3\nrecursion_boundaries\tchecked-half-open-v1\n";
+              out << "endpoint_model\tcompensating-one-sided-root-v1\nendpoint_seconds\t" << endpoint_review.seconds
+                    << "\nendpoint_kernel_calls\t" << endpoint_review.kernel_calls
+                    << "\nendpoint_accepted\t" << endpoint_review.accepted
+                    << "\ninitial_anchor_stage\treviewed\nrecursion_trace_stage\tunrefined-search\n";
+              out << "block_model\tbounded-context-block-v1\nblock_kernel\tlinear-7state-dp-9bit-two-strip-v1\nblock_seconds\t" << block_review.seconds
+                    << "\nblock_kernel_calls\t" << block_review.kernel_calls
+                    << "\nblock_accepted\t" << block_review.accepted
+                    << "\nblock_pre_stitch_seconds\t" << preblock_stitched.total_seconds << '\n';
+              out << "cross_region_model\tbounded-positive-context-v1\ncross_region_directions\tfrozen\ncross_region_score_baseline\tsum-existing-forward-fragments\ncross_region_seconds\t" << cross_review.seconds
+                    << "\ncross_region_kernel_calls\t" << cross_review.kernel_calls
+                    << "\ncross_region_accepted\t" << cross_review.accepted << '\n';
+              out << "copy_model\tcopy-aware-v1\ncopy_seconds\t" << copies.total_seconds << '\n';
+              out << "wfa_calls_scope\tanchor_stage\nanchor_status\tcomplete\n"
+                    << "stitch_status\t" << (stitched.complete ? "complete" : "partial")
+                    << "\nstitch_complete_scope\teligible_internal_gaps\nstitch_score_model\t"
+                    << CentromereStitchScoreModelName(stitched.score_model)
+                    << "\nstitch_dp_calls\t" << stitched.dp_calls
+                    << "\nstitch_wavefront_calls\t" << stitched.wavefront_calls << '\n'
+                    << "stitch_alignment_formats\t" << spec.formats.ToString() << '\n'
+                    << "stitch_format_contract\tpath-segments-v1\n";
+            }
+          });
+          if (i >= standard_offset && i < standard_offset + standard_exports.size())
+            MaybeInjectWriterFailure("stitch-" + targets[i].extension().string().substr(1));
+          if (i == endpoint_offset + 2)
+            MaybeInjectWriterFailure("endpoint-review");
+          if (i == block_offset + 2)
+            MaybeInjectWriterFailure("block-review");
+          if (i == cross_offset + 2)
+            MaybeInjectWriterFailure("cross-region-review");
+          MaybeInjectWriterFailure(i == stitch_offset
+            ? "stitch-segments" : (i == 2 ? "directed-final-anchors" : "directed-anchors"));
+          published.Add(tmp, targets[i]);
+          PublishNewFile(tmp, targets[i]);
+        }
+        CheckInterruption("publication");
+        RunStatistics stats;
+        stats.reference_contigs = stats.query_contigs = 1;
+        stats.reference_bases = r.size(); stats.query_bases = q.size();
+        stats.selected_seed_count = stats.merged_seed_count = anchors.final.size();
+        stats.chain_count = static_cast<std::uint64_t>(std::count_if(anchors.tasks.begin(), anchors.tasks.end(),
+          [](const auto& task) { return task.final_anchor_count != 0; }));
+        stats.seed_seconds = anchors.total_seconds;
+        stats.total_seconds = SecondsBetween(total_begin, Clock::now());
+        stats.actual_seed_route = "rama-fixed-direction-recursive-v1";
+        stats.chaining_route = "rama-source-collinear-v1";
+        stats.alignment_count = stitched.segments.size();
+        stats.chain_and_extension_seconds = copies.total_seconds + stitched.total_seconds;
+        progress.Finish(stitched.complete ? "supported internal gaps completed"
+          : "partial internal gaps; unresolved intervals retained");
+        if (logger) {
+          const auto status = !stitched.complete ? "partial" : "success";
+          logger->Info(std::string("status=") + status + " output_kind=branch-segments" +
+            " wfa_calls=" + std::to_string(stitched.wavefront_calls) + " regions=" +
+            std::to_string(anchors.regions.size()) + " initial_anchors=" + std::to_string(anchors.initial.size()) +
+            " final_anchors=" + std::to_string(anchors.final.size()) + " total_seconds=" + std::to_string(stats.total_seconds));
+          for (const auto& target : targets) logger->Info("anchor_output=" + target.string());
+          logger->Flush();
+        }
+        OutputPaths exported_paths;
+        if (spec.formats.sam) exported_paths.sam = paths.sam;
+        if (spec.formats.paf) exported_paths.paf = paths.paf;
+        if (spec.formats.maf) exported_paths.maf = paths.maf;
+        RunOutcome outcome{std::move(exported_paths), std::move(stats)};
+        published.Commit();
+        return outcome;
+      }
       if(CentromereCliBlockOptions().planning_strategy==CentromereBlockStrategy::CountClusterDirectionsV8 ||
          CentromereCliBlockOptions().planning_strategy==CentromereBlockStrategy::OrientationEvidenceV9) {
         auto options=CentromereCliBlockOptions();
@@ -484,6 +899,13 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
           {".count-windows.tsv",WriteCentromereCountWindows},{".count-nodes.tsv",WriteCentromereCountNodes},
           {".count-candidates.tsv",WriteCentromereCountCandidates},{".count-gaps.tsv",WriteCentromereCountGaps},
           {".supported-intervals.tsv",WriteCentromereSupportedIntervals},{".direction-regions.tsv",WriteCentromereDirectionRegions}});
+        if(options.direction_plan_review)exports.push_back({".orientation-plan-reviews.tsv",WriteCentromereDirectionPlanReviews});
+        if(options.direction_local_protection)exports.push_back({".orientation-local-protection.tsv",WriteCentromereDirectionLocalProtectionReviews});
+        if(options.direction_island_context_review)exports.push_back({".orientation-island-context-reviews.tsv",WriteCentromereDirectionIslandContextReviews});
+        if(options.direction_island_audit)exports.push_back({".orientation-island-reviews.tsv",WriteCentromereDirectionIslandAudits});
+        if(options.overlap_compatibility)exports.insert(exports.end(),{
+          {".overlap-variants.tsv",WriteCentromereOverlapVariants},
+          {".overlap-summary.tsv",WriteCentromereOverlapSummary}});
         if(options.orientation_audit_known_blocks)exports.insert(exports.end(),{
           {".orientation-block-audit.tsv",WriteCentromereOrientationBlockAudit},
           {".orientation-known-blocks.tsv",WriteCentromereOrientationKnownIntervals}});
@@ -775,7 +1197,7 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
         }
         published.Commit();return {{},evidence.statistics};
       }
-      if (CentromereCliAnchorsOnly()) {
+      {  // Anchors-only diagnostic builds.
         const auto& r=reference.sequences.front();
         const auto& q=query.sequences.front();
         const std::array<std::filesystem::path,2> targets{
@@ -821,14 +1243,6 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
         published.Commit();
         return {{},anchors.statistics};
       }
-      result=AlignCentromeres(reference.sequences.front(),query.sequences.front(),cen_options);
-      index_route="rama-gsacak-ephemeral";
-      seeding_route=result.statistics.actual_seed_route;
-      adapter_provenance["rama.source_commit"]="7bc89c4902bc9254f18cc4b05c4bf491a10bd7cb";
-      adapter_provenance["rama.wfa2_commit"]="99a5879a3a2972eff168cbcc6610b6cf02844ed0";
-      adapter_provenance["rama.n_policy"]="hard-break-anchors;paired-N-is-mismatch";
-      timings["centromere_anchors"]=result.statistics.seed_seconds;
-      timings["centromere_gap_alignment"]=result.statistics.chain_and_extension_seconds;
     } else if (SufkitAdapterAvailable()) {
       SufkitSeedResult seed_result;
       RunStatistics seed_statistics;

@@ -1,5 +1,6 @@
 #pragma once
 #include "centromere_orientation_connections.hpp"
+#include "centromere_direction_repair.hpp"
 #include <algorithm>
 #include <span>
 
@@ -13,7 +14,7 @@ namespace ramag::detail {
 template<class EmitAudit,class EmitKnown,class Check>
 void VisitKnownOrientationBlockAudit(std::span<const CentromereBlock> blocks,
     std::span<const OrientationCoverage> labels,Length query_length,Length gap_limit,
-    EmitAudit audit,EmitKnown known,Check check) {
+    EmitAudit audit,EmitKnown known,Check check,bool audit_all_supported_conflicts=false) {
   if(!gap_limit)throw AlignmentError("known-block audit requires a positive gap limit");
   for(std::size_t i=0;i<labels.size();++i) {
     check();const auto& row=labels[i];
@@ -51,7 +52,9 @@ void VisitKnownOrientationBlockAudit(std::span<const CentromereBlock> blocks,
     for(std::size_t i=1;i<anchors.size();++i) {
       check();const auto& left=anchor(i-1);const auto& right=anchor(i);
       const Position gap_begin=left.query_begin+left.length,gap_end=right.query_begin;
-      if(gap_end-gap_begin<=gap_limit)continue;
+      // The opt-in repair admits direct opposing-window evidence at any
+      // positive gap size. Planning anchors themselves remain unchanged.
+      if(gap_begin==gap_end || (!audit_all_supported_conflicts && gap_end-gap_begin<=gap_limit))continue;
       auto label=std::lower_bound(labels.begin(),labels.end(),gap_begin,
         [](const auto& row,auto p){return row.end<=p;});
       Position cut_begin=0,cut_end=0;bool pending=false;

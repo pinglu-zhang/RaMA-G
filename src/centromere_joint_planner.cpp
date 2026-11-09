@@ -1,5 +1,7 @@
 #include "ramag/centromere_blocks.hpp"
 #include "centromere_detail.hpp"
+#include "centromere_overlap_compatibility.hpp"
+#include "centromere_direction_plan_review.hpp"
 #include "centromere_orientation_connections.hpp"
 #include "centromere_orientation_block_audit.hpp"
 #include "centromere_orientation_long_gap.hpp"
@@ -29,6 +31,9 @@ constexpr auto none=std::numeric_limits<std::size_t>::max();
 struct Node {
   CentromereAnchor anchor;
   Strand strand;
+  bool overlap_variant{};
+  bool uniform_density{true};
+  detail::AnchorClipWitnesses clipping;
   std::size_t predecessor{none},first{};
   Length support{};
   double weight{};
@@ -71,6 +76,8 @@ class Budget final : public std::pmr::memory_resource {
     live_+=bytes;peak=std::max(peak,live_);
   }
   void Release(std::uint64_t bytes){live_-=bytes;}
+  std::uint64_t Live() const {return live_;}
+  void Restore(std::uint64_t checkpoint){live_=checkpoint;}
 };
 template<class T>using Vec=std::pmr::vector<T>;
 template<class T>void Reserve(std::vector<T>& v,std::size_t size,Budget& budget) {
@@ -147,11 +154,34 @@ Solution Solve(const Vec<Item>& items,Strand background,Length qlength,
   return result;
 }
 
+// The geometry-only public planner has no sequence payload. The production
+// route supplies both sequences and checks every derived exact anchor again.
+void ValidateOverlapVariants(const CentromereBlockResult& out,std::string_view reference,
+    std::string_view query,const CentromereBlockOptions& options) {
+  if(reference.empty() && query.empty())return;
+  auto dna=[](char c) {
+    switch(c){case 'A':case 'a':return 'A';case 'C':case 'c':return 'C';
+      case 'G':case 'g':return 'G';case 'T':case 't':return 'T';default:return '\0';}
+  };
+  auto complement=[](char c){return c=='A'?'T':c=='C'?'G':c=='G'?'C':c=='T'?'A':'\0';};
+  for(const auto& v:out.overlap_variants) {
+    const auto& a=v.variant;
+    for(Length i=0;i<a.length;++i) {
+      if((i&65535U)==0)Check(options);
+      const auto r=dna(reference[static_cast<std::size_t>(a.reference_begin+i)]);
+      const auto qpos=v.strand==Strand::Forward ? a.query_begin+i : a.query_begin+a.length-1-i;
+      const auto q=dna(query[static_cast<std::size_t>(qpos)]);
+      if(!r || !q || r!=(v.strand==Strand::Forward?q:complement(q)))
+        throw AlignmentError("overlap-clipped candidate is not an exact DNA match");
+    }
+  }
+}
+
 // The same length-first DP and RaMA secondary score as ScoreDirectionChain,
 // with compact rows and a bounded allocator for every transient container.
 // No source-ID/path copies or per-anchor provenance objects are needed here.
 void CompactChains(const std::vector<CentromerePlanningAnchor>& input,Strand strand,Length qlength,
-                   Vec<Node>& nodes,Budget& budget,const CentromereBlockOptions& options,bool normalize_only=false) {
+                   Vec<Node>& nodes,Budget& budget,const CentromereBlockOptions& options,CentromereBlockResult& out,bool normalize_only=false) {
   struct Piece {Position r,u;Length n;double density;std::size_t id;};
   Vec<Piece> pieces(&budget);pieces.reserve(static_cast<std::size_t>(std::count_if(input.begin(),input.end(),
     [&](const auto& a){return a.strand==strand;})));
@@ -174,14 +204,75 @@ void CompactChains(const std::vector<CentromerePlanningAnchor>& input,Strand str
     for(auto j=i;j<end;++j){events.push_back({pieces[j].r,pieces[j].density,true});events.push_back({pieces[j].r+pieces[j].n,pieces[j].density,false});}
     std::sort(events.begin(),events.end(),[](const auto& a,const auto& b){return a.position<b.position;});
     std::pmr::map<double,std::size_t> active(&budget);Position prior=pieces[i].r;double weight=0;
+    double first_density=0;bool have_density=false,uniform_density=true;
     for(const auto& e:events) {
-      if(!active.empty())weight+=static_cast<double>(e.position-prior)*active.rbegin()->first;
+      if(!active.empty() && e.position>prior) {
+        const auto density=active.rbegin()->first;
+        weight+=static_cast<double>(e.position-prior)*density;
+        if(have_density && density!=first_density)uniform_density=false;
+        if(!have_density){first_density=density;have_density=true;}
+      }
       if(e.add)++active[e.density];
       else {auto it=active.find(e.density);if(it==active.end())throw AlignmentError("invalid normalization events");if(!--it->second)active.erase(it);}
       prior=e.position;
     }
     Node n;n.anchor={pieces[i].r,strand==Strand::Forward ? pieces[i].u : qlength-pieces[i].u-(finish-pieces[i].r),finish-pieces[i].r,weight};
-    n.strand=strand;nodes.push_back(n);i=end;
+    n.strand=strand;n.uniform_density=uniform_density;n.clipping.source=nodes.size();
+    nodes.push_back(n);i=end;
+  }
+  if(options.overlap_compatibility) {
+    const auto count=nodes.size()-base;
+    auto proposed=detail::FindAnchorEndClips(count,[&](auto i)->const CentromereAnchor& {
+      return nodes[base+i].anchor;
+    },strand,qlength,&budget,[&](){Check(options);});
+    out.overlap_pairs_examined+=proposed.pairs_examined;
+    out.overlap_local_support_rejections+=proposed.local_support_rejections;
+    out.overlap_budget_exhausted=out.overlap_budget_exhausted || proposed.budget_exhausted;
+    if(!proposed.budget_exhausted)for(std::size_t i=0;i<count;++i) {
+      const auto original=nodes[base+i];const auto clips=proposed.clips[i];
+      // Integral normalized weights cannot be prorated when their maximum raw
+      // density changes along the anchor. Preserve such original nodes intact.
+      if(!original.uniform_density) {
+        if(clips.front || clips.back)++out.overlap_nonuniform_nodes_skipped;
+        continue;
+      }
+      auto append=[&](Length front,Length back) {
+        if(!front && !back)return;
+        if(front>=original.anchor.length || back>=original.anchor.length-front)return;
+        Node n=original;n.overlap_variant=true;
+        n.clipping.front=front ? nodes[base+clips.front_witness].clipping.source : none;
+        n.clipping.back=back ? nodes[base+clips.back_witness].clipping.source : none;
+        n.clipping.trim_front=front;n.clipping.trim_back=back;
+        n.anchor.reference_begin+=front;
+        n.anchor.query_begin+=strand==Strand::Forward ? front : back;
+        n.anchor.length-=front+back;
+        n.anchor.weight=original.anchor.weight*static_cast<double>(n.anchor.length)/static_cast<double>(original.anchor.length);
+        auto supported=[&](std::size_t witness,double cost,bool before) {
+          if(witness>=count)return false;
+          const auto& a=before ? nodes[base+witness].anchor : n.anchor;
+          const auto& b=before ? n.anchor : nodes[base+witness].anchor;
+          auto u=[&](const auto& x){return strand==Strand::Forward ? x.query_begin : qlength-x.query_begin-x.length;};
+          if(a.reference_begin+a.length>b.reference_begin || u(a)+a.length>u(b))
+            throw AlignmentError("clipping witness overlaps after final trimming");
+          if(!detail::AnchorClipGapHasLocalSupport(b.reference_begin-a.reference_begin-a.length,
+              u(b)-u(a)-a.length,a.weight,b.weight)) {
+            ++out.overlap_local_support_rejections;return false;
+          }
+          return !cost || cost<std::min(a.weight,b.weight);
+        };
+        // Combining two individually valid end clips can remove enough weight
+        // to invalidate either connection; validate the final piece again.
+        if((front && !supported(clips.front_witness,clips.front_cost,true)) ||
+           (back && !supported(clips.back_witness,clips.back_cost,false)))return;
+        nodes.push_back(n);
+        if(out.overlap_variants.size()==out.overlap_variants.capacity())
+          Reserve(out.overlap_variants,std::max<std::size_t>(1,out.overlap_variants.capacity()*2),budget);
+        out.overlap_variants.push_back({original.anchor,n.anchor,strand,front,back});
+        ++out.overlap_variants_added;
+      };
+      append(clips.front,0);append(0,clips.back);
+      if(clips.front && clips.back)append(clips.front,clips.back);
+    }
   }
   auto oriented=[&](const Node& n){return strand==Strand::Forward ? n.anchor.query_begin : qlength-n.anchor.query_begin-n.anchor.length;};
   std::sort(nodes.begin()+static_cast<std::ptrdiff_t>(base),nodes.end(),[&](const auto& a,const auto& b){
@@ -295,7 +386,11 @@ void LocalConnections(const Vec<Node>& nodes,std::size_t base,std::size_t finish
     auto high=radius==std::numeric_limits<Length>::max() ? active.end() : active.upper_bound(Shift(d,radius,true));
     for(auto it=low;it!=high;++it)for(const auto j:it->second) {
       const auto& b=nodes[j].anchor;
+      if(!detail::AnchorClipConnectionAllowed(nodes[j].clipping,nodes[i].clipping))continue;
       if(u(j)+b.length>u(i))continue;
+      if((nodes[j].overlap_variant || nodes[i].overlap_variant) &&
+         !detail::AnchorClipGapHasLocalSupport(a.reference_begin-b.reference_begin-b.length,
+           u(i)-u(j)-b.length,a.weight,b.weight))continue;
       const auto rg=a.reference_begin-b.reference_begin,qg=u(i)-u(j);
       const auto delta=rg>=qg ? rg-qg : qg-rg;
       const double cost=2.0*std::log2(static_cast<double>(delta)+1.0);
@@ -327,6 +422,8 @@ struct LocalWorkspace {
 void TailsTo(std::size_t endpoint,const Vec<Node>& nodes,const LocalGraph& graph,
     LocalWorkspace& w,const CentromereBlockOptions& options,CentromereBlockResult& out) {
   ++w.epoch;w.heap.clear();w.visited.clear();
+  // A back-clipped node still owes a right-hand witness and cannot end a path.
+  if(nodes[endpoint].clipping.back!=none)return;
   w.tails[endpoint]={nodes[endpoint].anchor.length,nodes[endpoint].anchor.weight,none,w.epoch};
   if(graph.single_predecessor) {
     // A predecessor forest has no branching to schedule. Following its links
@@ -460,6 +557,7 @@ LocalSolution SolveLocal(const Vec<Node>& nodes,const LocalGraph& graph,Strand b
       for(std::uint32_t family=0;family<(regional ? 2U : 1U);++family) {
       TailsTo(endpoint,nodes,family ? *regional : graph,work,options,out);
       for(const auto first:work.visited) {
+        if(nodes[first].clipping.front!=none)continue;
         const auto& tail=work.tails[first];const auto item=LocalItem(first,endpoint,nodes,tail.support,tail.weight);
         const auto ver=std::upper_bound(versions.begin(),versions.end(),item.rb,[](auto p,const auto& v){return p<v.end;});
         const auto root=ver==versions.begin() ? none : std::prev(ver)->root;
@@ -611,6 +709,7 @@ void LocalPlan(CentromereBlockResult& out,const Vec<Node>& nodes,std::size_t rev
       for(std::uint32_t family=0;family<(graph.hierarchical ? 2U : 1U);++family) {
       TailsTo(endpoint,nodes,family ? regional : graph,work,options,out);
       for(const auto first:work.visited)if(nodes[first].anchor.reference_begin==item.rb) {
+        if(nodes[first].clipping.front!=none)continue;
         const auto& a=work.tails[first];const auto box=LocalItem(first,endpoint,nodes,a.support,a.weight);
         if(box.qb==item.qb && box.qe==item.qe && a.support==item.support && a.weight==item.weight){ambiguous=true;break;}
       }
@@ -727,18 +826,132 @@ void LocalPlan(CentromereBlockResult& out,const Vec<Node>& nodes,std::size_t rev
     }
   }
   out.planner_reserved_bytes=budget.peak;
-  out.planner_capacity_bytes=out.root_candidates.capacity()*sizeof(CentromerePlanningAnchor)+nodes.capacity()*sizeof(Node)+
+  out.planner_capacity_bytes=out.overlap_variants.capacity()*sizeof(CentromereOverlapVariant)+out.root_candidates.capacity()*sizeof(CentromerePlanningAnchor)+nodes.capacity()*sizeof(Node)+
     (graph.incoming.capacity()+regional.incoming.capacity())*sizeof(Range)+(graph.edges.capacity()+regional.edges.capacity())*sizeof(std::size_t)+
     (graph.increments.capacity()+regional.increments.capacity())*sizeof(double)+out.blocks.capacity()*sizeof(CentromereBlock)+
     work.tails.capacity()*sizeof(Tail)+(work.heap.capacity()+work.visited.capacity()+by_end.capacity())*sizeof(std::size_t);
   for(const auto& b:out.blocks)out.planner_capacity_bytes+=b.planning_anchors.capacity()*sizeof(CentromereAnchor);
 }
+// One bounded pass. The frozen blocks and roots are read until every review
+// completes; only then is the replacement published. No accepted core is a root.
+void ReviewLocalDirectionPlan(CentromereBlockResult& out,Length rlength,Length qlength,
+    std::string_view reference,std::string_view query,Budget& budget,const CentromereBlockOptions& options) {
+  if(!options.direction_plan_review)return;
+  if(options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9)
+    throw CentromereInputError("direction plan review requires orientation-evidence-v9");
+  const auto started=std::chrono::steady_clock::now();
+  using Evidence=detail::DirectionIslandEvidence;
+  Vec<Evidence> roots(&budget);
+  for(std::size_t i=0;i<out.root_candidates.size();++i) {
+    const auto& r=out.root_candidates[i];
+    roots.push_back({r.anchor,r.strand,i+1,true,r.reference_count>0 && r.query_count>0,r.reference_count,r.query_count});
+  }
+  auto origin=[&](const CentromereAnchor& a,Strand strand) {
+    Evidence answer{a,strand,0,false,false,0,0};
+    for(const auto& root:roots) {
+      if(++out.direction_plan_review_checks>10000000)throw detail::CentromereBudgetExceeded("direction plan review checks exhausted");
+      const auto& b=root.anchor;
+      if(root.strand!=strand || !detail::direction_island_detail::SameMapping(answer,root,qlength) ||
+         b.reference_begin>a.reference_begin || b.reference_begin+b.length<a.reference_begin+a.length ||
+         b.query_begin>a.query_begin || b.query_begin+b.length<a.query_begin+a.length)continue;
+      if(answer.source_proven && answer.source_id!=root.source_id) {
+        const auto& old=roots[answer.source_id-1];
+        if(old.anchor.reference_begin!=b.reference_begin || old.anchor.query_begin!=b.query_begin ||
+           old.anchor.length!=b.length || old.reference_count!=root.reference_count || old.query_count!=root.query_count) {
+          answer.source_proven=false;answer.source_id=0;return answer;
+        }
+      } else {
+        answer.source_id=root.source_id;answer.source_proven=true;answer.occurrence_proven=root.occurrence_proven;
+        answer.reference_count=root.reference_count;answer.query_count=root.query_count;
+      }
+    }
+    return answer;
+  };
+  Vec<CentromereDirectionPlanReview> reviews(&budget);
+  bool exhausted=false;
+  try {
+    for(const auto& b:out.blocks)if(b.direction_known)for(std::size_t i=1;i<b.planning_anchors.size();++i) {
+      Check(options);
+      const auto& l=b.planning_anchors[i-1];const auto& r=b.planning_anchors[i];
+      const auto u=[&](const auto& a){return b.strand==Strand::Forward?a.query_begin:qlength-a.query_begin-a.length;};
+      if(l.reference_begin+l.length>=r.reference_begin || u(l)+l.length>=u(r) ||
+         r.reference_begin-l.reference_begin-l.length!=u(r)-u(l)-l.length)continue;
+      const auto left=origin(l,b.strand),right=origin(r,b.strand);
+      auto d=detail::ReviewExactDirectionGap(left,right,roots,rlength,qlength,reference,query,&budget,[&] {
+        if(options.interruption_callback)options.interruption_callback("centromere-direction-plan-review");
+        if(++out.direction_plan_review_checks>10000000)throw detail::CentromereBudgetExceeded("direction plan review checks exhausted");
+      });
+      reviews.push_back({reviews.size()+1,b.id,i-1,d.source_id,d.checks,
+        d.core.reference_begin,d.core.reference_begin+d.core.length,d.core.query_begin,d.core.query_begin+d.core.length,
+        d.strand,d.core.weight,d.accepted,d.reason});
+      if(std::string_view(d.reason)=="budget_exhausted"){exhausted=true;break;}
+    }
+  } catch(const detail::CentromereBudgetExceeded&) {exhausted=true;}
+  // A partial pass is diagnostic only. It cannot silently select a prefix.
+  if(exhausted)for(auto& x:reviews){x.accepted=false;x.reason="batch_budget_exhausted";}
+  const auto accepted=std::count_if(reviews.begin(),reviews.end(),[](const auto& x){return x.accepted;});
+  Reserve(out.direction_plan_reviews,reviews.size(),budget);
+  for(const auto& x:reviews)budget.Account(x.reason.capacity()+1);
+  std::vector<CentromereBlock> replacement;
+  if(accepted) {
+    Reserve(replacement,out.blocks.size()+2*static_cast<std::size_t>(accepted),budget);
+    auto retain=[&](const CentromereBlock& b,std::size_t begin,std::size_t end) {
+      CentromereBlock z;
+      z.strand=b.strand;z.direction_known=b.direction_known;z.tentative=b.tentative;z.skeleton=end-begin==1;
+      z.inversion_candidate=b.inversion_candidate;z.status=b.status;z.reason=b.reason;z.region_id=b.region_id;
+      Reserve(z.planning_anchors,end-begin,budget);
+      for(auto i=begin;i<end;++i)z.planning_anchors.push_back(b.planning_anchors[i]);
+      const auto& a=z.planning_anchors.front();const auto& t=z.planning_anchors.back();
+      z.reference_begin=a.reference_begin;z.reference_end=t.reference_begin+t.length;
+      z.query_begin=std::min(a.query_begin,t.query_begin);z.query_end=std::max(a.query_begin+a.length,t.query_begin+t.length);
+      for(const auto& x:z.planning_anchors)(z.strand==Strand::Forward?z.forward_support:z.reverse_support)+=x.length;
+      replacement.push_back(std::move(z));
+    };
+    for(const auto& b:out.blocks) {
+      std::size_t begin=0;bool split=false;
+      for(const auto& x:reviews)if(x.accepted && x.block_id==b.id) {
+        retain(b,begin,x.left_index+1);begin=x.left_index+1;split=true;
+        CentromereBlock core;core.strand=x.strand;core.reference_begin=x.reference_begin;core.reference_end=x.reference_end;
+        core.query_begin=x.query_begin;core.query_end=x.query_end;core.inversion_candidate=true;core.skeleton=true;
+        core.reason="exact_gap_opposite_core";
+        Reserve(core.planning_anchors,1,budget);core.planning_anchors.push_back({x.reference_begin,x.query_begin,x.reference_end-x.reference_begin,x.weight});
+        (core.strand==Strand::Forward?core.forward_support:core.reverse_support)=x.reference_end-x.reference_begin;
+        replacement.push_back(std::move(core));
+      }
+      if(split)retain(b,begin,b.planning_anchors.size());
+      else {
+        // Account copied retained storage while the frozen source still lives.
+        budget.Account(b.planning_anchors.size()*sizeof(CentromereAnchor));
+        replacement.push_back(b);
+      }
+    }
+    std::uint64_t oldbytes=out.blocks.capacity()*sizeof(CentromereBlock);
+    for(const auto& b:out.blocks)oldbytes+=b.planning_anchors.capacity()*sizeof(CentromereAnchor);
+    for(std::size_t i=0;i<replacement.size();++i)replacement[i].id=i+1;
+    std::uint64_t newbytes=replacement.capacity()*sizeof(CentromereBlock);
+    for(const auto& b:replacement)newbytes+=b.planning_anchors.capacity()*sizeof(CentromereAnchor);
+    out.blocks.swap(replacement);
+    std::vector<CentromereBlock>().swap(replacement);budget.Release(oldbytes);
+    out.planner_capacity_bytes=out.planner_capacity_bytes>=oldbytes?out.planner_capacity_bytes-oldbytes+newbytes:newbytes;
+  }
+  for(auto& x:reviews)out.direction_plan_reviews.push_back(std::move(x));
+  out.planner_capacity_bytes+=out.direction_plan_reviews.capacity()*sizeof(CentromereDirectionPlanReview);
+  out.planner_reserved_bytes=std::max(out.planner_reserved_bytes,budget.peak);
+  out.direction_plan_review_applied=true;
+  out.direction_plan_review_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+}
+
 #include "centromere_orientation_evidence.inc"
 } // namespace
 
 CentromereBlockResult detail::ReplanDirectionRegions(Length rlength,Length qlength,
     std::vector<CentromerePlanningAnchor>& candidates,const CentromereBlockOptions& options,
     Strand preferred_background,std::string_view reference_bases,std::string_view query_bases) {
+  if(options.overlap_compatibility &&
+     options.planning_strategy!=CentromereBlockStrategy::LocalCoherentFrontierV3 &&
+     options.planning_strategy!=CentromereBlockStrategy::FastLocalDirectionV6 &&
+     options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9)
+    throw CentromereInputError("overlap compatibility requires local-coherent-frontier-v3, fast-local-direction-v6 or orientation-evidence-v9");
   if(options.orientation_audit_known_blocks &&
      options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9)
     throw CentromereInputError("known-block orientation audit requires orientation-evidence-v9");
@@ -800,9 +1013,24 @@ CentromereBlockResult detail::ReplanDirectionRegions(Length rlength,Length qleng
   Vec<Node> nodes(&budget);
   Vec<Item> items(&budget);
   if(local) {
-    CompactChains(out.root_candidates,Strand::Forward,qlength,nodes,budget,options,!hierarchical);
-    const auto reverse_base=nodes.size();CompactChains(out.root_candidates,Strand::Reverse,qlength,nodes,budget,options,!hierarchical);
+    CompactChains(out.root_candidates,Strand::Forward,qlength,nodes,budget,options,out,!hierarchical);
+    const auto reverse_base=nodes.size();CompactChains(out.root_candidates,Strand::Reverse,qlength,nodes,budget,options,out,!hierarchical);
+    if(options.overlap_compatibility)ValidateOverlapVariants(out,reference_bases,query_bases,options);
     LocalPlan(out,nodes,reverse_base,rlength,qlength,preferred_background,budget,options,reference_bases,query_bases);
+    const auto review_checkpoint=budget.Live();
+    try {
+      ReviewLocalDirectionPlan(out,rlength,qlength,reference_bases,query_bases,budget,options);
+    } catch(const detail::CentromereBudgetExceeded&) {
+      // Every allocation is before the atomic block swap. Frozen science is
+      // still intact; release diagnostic capacity and restore the live ledger.
+      std::vector<CentromereDirectionPlanReview>().swap(out.direction_plan_reviews);
+      budget.Restore(review_checkpoint);
+      out.direction_plan_review_applied=true;out.direction_plan_review_budget_exhausted=true;
+    } catch(const std::bad_alloc&) {
+      std::vector<CentromereDirectionPlanReview>().swap(out.direction_plan_reviews);
+      budget.Restore(review_checkpoint);
+      out.direction_plan_review_applied=true;out.direction_plan_review_budget_exhausted=true;
+    }
     if(options.planning_strategy==CentromereBlockStrategy::OrientationEvidenceV9)
       OrientationEvidence(nodes,qlength,query_bases,out,budget,options);
     return out;
@@ -810,10 +1038,10 @@ CentromereBlockResult detail::ReplanDirectionRegions(Length rlength,Length qleng
   for(const auto strand:{Strand::Forward,Strand::Reverse}) {
     Check(options);
     const auto base=nodes.size();
-    CompactChains(out.root_candidates,strand,qlength,nodes,budget,options);
+    CompactChains(out.root_candidates,strand,qlength,nodes,budget,options,out);
     for(auto i=base;i<nodes.size();++i) {
       const auto& n=nodes[i];
-      items.push_back({n.anchor.reference_begin,n.anchor.reference_begin+n.anchor.length,
+      if(!n.overlap_variant)items.push_back({n.anchor.reference_begin,n.anchor.reference_begin+n.anchor.length,
         n.anchor.query_begin,n.anchor.query_begin+n.anchor.length,n.anchor.length,n.anchor.weight,i,true});
       if(n.predecessor!=none) {
         const auto& first=nodes[n.first].anchor;
@@ -824,6 +1052,7 @@ CentromereBlockResult detail::ReplanDirectionRegions(Length rlength,Length qleng
       }
     }
   }
+  if(options.overlap_compatibility)ValidateOverlapVariants(out,reference_bases,query_bases,options);
   auto forward=Solve(items,Strand::Forward,qlength,options,budget);
   auto reverse=Solve(items,Strand::Reverse,qlength,options,budget);
   // A palindrome can give exactly equal, opposite evidence for the same
@@ -883,7 +1112,7 @@ CentromereBlockResult detail::ReplanDirectionRegions(Length rlength,Length qleng
   }
   unknown(rlength,qlength);
   out.planner_reserved_bytes=budget.peak;
-  out.planner_capacity_bytes=raw_bytes+nodes.capacity()*sizeof(Node)+items.capacity()*sizeof(Item)+
+  out.planner_capacity_bytes=out.overlap_variants.capacity()*sizeof(CentromereOverlapVariant)+raw_bytes+nodes.capacity()*sizeof(Node)+items.capacity()*sizeof(Item)+
     out.blocks.capacity()*sizeof(CentromereBlock)+
     (forward.path.capacity()+reverse.path.capacity()+by_box.capacity())*sizeof(std::size_t)+items.size();
   for(const auto& b:out.blocks)out.planner_capacity_bytes+=b.planning_anchors.capacity()*sizeof(CentromereAnchor);

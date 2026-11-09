@@ -4,8 +4,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 else()
   set(_rama_default OFF)
 endif()
+option(RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW "Experimental component-scoped direction island audit" OFF)
+option(RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW "Experimental exact opposite cores inside planned chain gaps" OFF)
+option(RAMAG_CENTROMERE_DIRECTION_LOCAL_PROTECTION "Experimental local preservation of known direction evidence" OFF)
+option(RAMAG_CENTROMERE_NODE_COVERAGE_GUARD "Experimental preservation of already recovered recursive coverage" OFF)
+set(RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES 67108864 CACHE STRING "Maximum deterministic recursive proposal cache bytes")
+if(NOT RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES must be a non-negative integer")
+endif()
+option(RAMAG_CENTROMERE_DIRECTION_ISLAND_AUDIT "Experimental final known-direction island audit" OFF)
+option(RAMAG_CENTROMERE_OVERLAP_COMPATIBILITY "Experimental exact-anchor end compatibility" OFF)
+option(RAMAG_CENTROMERE_DIRECTION_EVIDENCE_REPAIR "Experimental coherent coverage and direct counterevidence" OFF)
 option(RAMAG_ENABLE_CENTROMERE "Build the source-derived RaMA/WFA2 backend" ${_rama_default})
-option(RAMAG_CENTROMERE_ANCHORS_ONLY "Temporarily stop align -c after source RaMA anchors" ON)
 option(RAMAG_CENTROMERE_DIRECTIONS "Experimental length-driven bidirectional evidence for align -c" OFF)
 option(RAMAG_CENTROMERE_BLOCK_ALIGNMENT "Experimental initial-direction blocks followed by recursive RaMA/WFA" OFF)
 option(RAMAG_CENTROMERE_ORIENTATION_CONNECTED_GAPS "Experimental continuous-window and known-block connections for v9" OFF)
@@ -39,6 +49,9 @@ foreach(_parameter QUERY_LIMIT REFERENCE_LIMIT INPUT_BUDGET)
     message(FATAL_ERROR "Unified gap bounds must be nonnegative integers")
   endif()
 endforeach()
+if(RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW AND NOT RAMAG_CENTROMERE_DIRECTION_ISLAND_AUDIT)
+  message(FATAL_ERROR "Island context review requires the existing island audit")
+endif()
 if(RAMAG_CENTROMERE_REPAIR_DRIFT_CONSISTENT_GAPS AND NOT RAMAG_CENTROMERE_REPAIR_INHERITED_DIRECTIONS)
   message(FATAL_ERROR "Drift-consistent repair requires inherited-direction repair")
 endif()
@@ -98,6 +111,17 @@ set_property(CACHE RAMAG_CENTROMERE_BLOCK_PLANNER PROPERTY STRINGS initial-direc
 if(NOT RAMAG_CENTROMERE_BLOCK_PLANNER MATCHES "^(initial-direction-blocks-v1|joint-local-blocks-v2|local-coherent-frontier-v3|hierarchical-direction-regions-v4|direction-regions-only-v5|fast-local-direction-v6|count-cluster-directions-v8|orientation-evidence-v9)$")
   message(FATAL_ERROR "Unknown centromere block planner")
 endif()
+set(_rama_anchors_default OFF)
+if(RAMAG_CENTROMERE_DIRECTIONS OR RAMAG_CENTROMERE_BLOCK_PLANNER MATCHES "^(count-cluster-directions-v8|orientation-evidence-v9)$")
+  set(_rama_anchors_default ON)
+endif()
+option(RAMAG_CENTROMERE_ANCHORS_ONLY "Stop align -c after anchor or direction diagnostics" ${_rama_anchors_default})
+set(_rama_chain_overlap_default ON)
+if(RAMAG_CENTROMERE_ANCHORS_ONLY OR RAMAG_CENTROMERE_BLOCK_ALIGNMENT)
+  set(_rama_chain_overlap_default OFF)
+endif()
+option(RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY "Use compatible ends in fixed-direction RaMA chains" ${_rama_chain_overlap_default})
+
 if(RAMAG_CENTROMERE_ORIENTATION_CONNECTED_GAPS AND NOT RAMAG_CENTROMERE_BLOCK_PLANNER STREQUAL "orientation-evidence-v9")
   message(FATAL_ERROR "Connected orientation gaps require orientation-evidence-v9")
 endif()
@@ -172,12 +196,25 @@ endif()
 set(RAMAG_WFA2_SOURCE_DIR "" CACHE PATH "Clean pinned WFA2 source override")
 add_library(ramag_centromere STATIC src/centromere_alignment.cpp src/centromere.cpp
   src/centromere_blocks.cpp
+  src/centromere_directed_anchors.cpp
+  src/centromere_copy_anchors.cpp
+  src/centromere_stitch.cpp
+  src/centromere_endpoint_refinement.cpp
+  src/centromere_block_dp.cpp
+  src/centromere_stitch_formats.cpp
+  src/centromere_stitch_kernel.cpp
   src/centromere_joint_planner.cpp
   src/centromere_region_refinement.cpp
   src/centromere_direction.cpp src/centromere_direction_geometry.cpp src/centromere_direction_output.cpp)
 add_library(RaMAG::centromere ALIAS ramag_centromere)
 target_compile_features(ramag_centromere PUBLIC cxx_std_20)
 target_compile_definitions(ramag_centromere PRIVATE
+  RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW}>
+  RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW}>
+  RAMAG_CENTROMERE_DIRECTION_LOCAL_PROTECTION=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_LOCAL_PROTECTION}>
+  RAMAG_CENTROMERE_DIRECTION_ISLAND_AUDIT=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_ISLAND_AUDIT}>
+  RAMAG_CENTROMERE_OVERLAP_COMPATIBILITY=$<BOOL:${RAMAG_CENTROMERE_OVERLAP_COMPATIBILITY}>
+  RAMAG_CENTROMERE_DIRECTION_EVIDENCE_REPAIR=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_EVIDENCE_REPAIR}>
   RAMAG_CENTROMERE_BLOCK_ALIGNMENT=$<BOOL:${RAMAG_CENTROMERE_BLOCK_ALIGNMENT}>
   RAMAG_CENTROMERE_JOINT_BLOCKS=$<STREQUAL:${RAMAG_CENTROMERE_BLOCK_PLANNER},joint-local-blocks-v2>
   RAMAG_CENTROMERE_LOCAL_FRONTIER=$<STREQUAL:${RAMAG_CENTROMERE_BLOCK_PLANNER},local-coherent-frontier-v3>
@@ -235,6 +272,20 @@ if(RAMAG_ENABLE_CENTROMERE)
   if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Pinned centromere backend currently requires Linux")
   endif()
+  # Only the pinned base-level kernels are embedded, not upstream global flags
+  # or its anchoring, graph merging, and CLI targets.
+  set(_stitch_vendor "${PROJECT_SOURCE_DIR}/third_party/centrolign_stitch")
+  add_library(ramag_centrolign_stitch_objects OBJECT
+    "${_stitch_vendor}/src/alignment.cpp"
+    "${_stitch_vendor}/src/graph.cpp"
+    "${_stitch_vendor}/src/utility.cpp"
+    "${_stitch_vendor}/src/logging.cpp")
+  target_compile_features(ramag_centrolign_stitch_objects PRIVATE cxx_std_20)
+  target_include_directories(ramag_centrolign_stitch_objects SYSTEM PRIVATE "${_stitch_vendor}/include")
+  target_include_directories(ramag_centrolign_stitch_objects PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  set_target_properties(ramag_centrolign_stitch_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_sources(ramag_centromere PRIVATE $<TARGET_OBJECTS:ramag_centrolign_stitch_objects>)
+  target_include_directories(ramag_centromere SYSTEM PRIVATE "${_stitch_vendor}/include")
   include(FetchContent)
   set(_wfa_commit 99a5879a3a2972eff168cbcc6610b6cf02844ed0)
   if(RAMAG_WFA2_SOURCE_DIR)
@@ -258,6 +309,11 @@ if(RAMAG_ENABLE_CENTROMERE)
   )
   target_compile_features(ramag_rama_dependencies PRIVATE cxx_std_20)
   target_include_directories(ramag_rama_dependencies PRIVATE third_party/rama/core)
+  target_include_directories(ramag_rama_dependencies PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+  target_compile_definitions(ramag_rama_dependencies PRIVATE
+    RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY=$<BOOL:${RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY}>
+    RAMAG_CENTROMERE_NODE_COVERAGE_GUARD=$<BOOL:${RAMAG_CENTROMERE_NODE_COVERAGE_GUARD}>
+    RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES=${RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES})
   set_target_properties(ramag_rama_dependencies PROPERTIES POSITION_INDEPENDENT_CODE ON)
   add_library(ramag_wfa_objects OBJECT
   "${_wfa}/wavefront/wavefront_align.c"
@@ -313,7 +369,7 @@ if(RAMAG_ENABLE_CENTROMERE)
   target_compile_definitions(ramag_centromere PRIVATE RAMAG_HAVE_CENTROMERE=1)
   target_link_libraries(ramag_centromere PRIVATE Threads::Threads m)
   if(RAMAG_ENABLE_SANITIZERS)
-    foreach(_t ramag_rama_dependencies ramag_wfa_objects)
+    foreach(_t ramag_rama_dependencies ramag_wfa_objects ramag_centrolign_stitch_objects)
       target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     endforeach()
   endif()
@@ -333,8 +389,9 @@ install(TARGETS ramag_centromere EXPORT RaMAGCentromereTargets ARCHIVE DESTINATI
 install(EXPORT RaMAGCentromereTargets NAMESPACE RaMAG:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGCentromere)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RaMAGCentromereConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/RaMAGCentromereConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGCentromere)
-install(FILES include/ramag/centromere.hpp include/ramag/centromere_direction.hpp include/ramag/centromere_blocks.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
+install(FILES include/ramag/centromere.hpp include/ramag/centromere_direction.hpp include/ramag/centromere_blocks.hpp include/ramag/centromere_directed_anchors.hpp include/ramag/centromere_copy_anchors.hpp include/ramag/centromere_stitch.hpp include/ramag/centromere_stitch_formats.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
 install(FILES third_party/rama/upstream/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/rama)
 if(RAMAG_ENABLE_CENTROMERE)
   install(FILES "${_wfa}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/wfa2)
+  install(FILES "${_stitch_vendor}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/centrolign_stitch)
 endif()

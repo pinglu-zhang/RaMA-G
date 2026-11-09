@@ -267,7 +267,69 @@ struct CentromereUnifiedHypothesis {
   bool accepted{};
   std::string reason;
 };
+struct CentromereOverlapVariant {
+  CentromereAnchor original,variant;
+  Strand strand{Strand::Forward};
+  Length trim_front{},trim_back{};
+};
+struct CentromereDirectionProtectionReview {
+  std::uint64_t id{},block_id{}; // block_id belongs to the compact baseline view.
+  Position begin{},end{};
+  Strand strand{Strand::Forward};
+  Length old_matched{},counter_matched{},candidate_same{},candidate_opposite{},candidate_unknown{},restored{};
+  bool protected_interval{},region_changed{};
+  std::string reason;
+};
+struct CentromereDirectionIslandAudit {
+  std::uint64_t id{},block_id{},left_source_id{},right_source_id{},checks{};
+  Position begin{},end{},reference_begin{},reference_end{},query_begin{},query_end{};
+  Strand strand{Strand::Forward},background{Strand::Forward};
+  Length reference_covered{},query_covered{},reference_unsupported{},query_unsupported{};
+  double weight{},score{};
+  bool eligible{},retracted{};
+  std::string reason;
+  std::string source_role{"candidate"}; // Baseline IDs never alias candidate block IDs.
+};
+struct CentromereDirectionIslandContextReview {
+  std::uint64_t id{},block_id{},checks{},components{};
+  Position original_begin{},original_end{},core_reference_begin{},core_reference_end{},core_query_begin{},core_query_end{};
+  Length reference_explained{},query_explained{},reference_unsupported{},query_unsupported{};
+  double old_score{},score{};
+  bool accepted{};
+  std::string reason;
+};
+struct CentromereDirectionPlanReview {
+  std::uint64_t id{},block_id{},left_index{},source_id{},checks{};
+  Position reference_begin{},reference_end{},query_begin{},query_end{};
+  Strand strand{Strand::Forward};
+  double weight{};
+  bool accepted{};
+  std::string reason;
+};
 struct CentromereBlockResult {
+  bool direction_plan_review_applied{},direction_plan_review_budget_exhausted{};
+  bool direction_island_context_budget_exhausted{};
+  std::vector<CentromereDirectionIslandContextReview> direction_island_context_reviews;
+  double direction_plan_review_seconds{};
+  std::uint64_t direction_plan_review_checks{};
+  std::vector<CentromereDirectionPlanReview> direction_plan_reviews;
+  bool direction_local_protection_applied{};
+  double direction_local_protection_baseline_seconds{},direction_local_protection_seconds{};
+  std::uint64_t direction_local_protection_checks{},direction_local_protection_regions_changed{};
+  std::vector<CentromereDirectionProtectionReview> direction_local_protection_reviews;
+  std::vector<CentromereOrientationKnownInterval> direction_local_protection_intervals;
+  // Frozen old targets for the post-protection island audit, not alignment output,
+  // candidate roots, macro blocks, window votes or independent flank evidence.
+  std::vector<CentromereBlock> direction_local_protection_baseline_blocks;
+  bool direction_island_audit_applied{};
+  double direction_island_audit_seconds{};
+  std::uint64_t direction_island_checks{};
+  std::vector<CentromereDirectionIslandAudit> direction_island_audits;
+  std::uint64_t overlap_pairs_examined{},overlap_variants_added{};
+  std::uint64_t overlap_nonuniform_nodes_skipped{};
+  std::uint64_t overlap_local_support_rejections{}; // Proposal checks, not distinct events.
+  bool overlap_budget_exhausted{};
+  std::vector<CentromereOverlapVariant> overlap_variants;
   AlignmentResult alignment;
   std::vector<CentromereAnchor> initial_forward,initial_reverse; // Original-forward query coordinates.
   std::vector<CentromereBlock> blocks;
@@ -391,6 +453,14 @@ struct CentromereBlockResult {
   std::vector<CentromereCollinearWitness> orientation_alternate_witnesses;
 };
 struct CentromereBlockOptions : CentromereAlignmentOptions {
+  // Opt-in candidate repairs; disabled preserves the frozen direction route.
+  bool direction_plan_review{false}; // Frozen-root local competition; no additional searches.
+  bool overlap_compatibility{false};
+  bool direction_evidence_repair{false};
+  bool direction_island_audit{false};
+  bool direction_island_context_review{false}; // Credit only proven disjoint components in the same flank frame.
+  std::uint64_t direction_island_context_check_limit{10000000}; // Also bounded by remaining original batch checks.
+  bool direction_local_protection{false}; // FindCentromereDirectionRegions only; compact frozen-root baseline.
   CentromereBlockStrategy planning_strategy{CentromereBlockStrategy::InitialDirectionBlocksV1};
   std::uint64_t planner_memory_limit_bytes{10000000000ULL};
   std::uint64_t wfa_memory_limit_bytes{512ULL*1024*1024};
@@ -448,7 +518,14 @@ struct CentromereBlockOptions : CentromereAlignmentOptions {
   std::function<void(const CentromereBlockResult&)> observation_callback;
 };
 
+void WriteCentromereDirectionIslandContextReviews(std::ostream&,const CentromereBlockResult&);
+void WriteCentromereDirectionPlanReviews(std::ostream&,const CentromereBlockResult&);
+void WriteCentromereDirectionLocalProtectionReviews(std::ostream&,const CentromereBlockResult&);
+void WriteCentromereDirectionIslandAudits(std::ostream&,const CentromereBlockResult&);
+void WriteCentromereOverlapVariants(std::ostream&,const CentromereBlockResult&);
+void WriteCentromereOverlapSummary(std::ostream&,const CentromereBlockResult&);
 [[nodiscard]] bool CentromereCliBlocks() noexcept;
+[[nodiscard]] bool CentromereCliFullAlignment() noexcept;
 [[nodiscard]] CentromereBlockOptions CentromereCliBlockOptions();
 [[nodiscard]] std::string_view CentromereBlockStrategyName(CentromereBlockStrategy) noexcept;
 [[nodiscard]] std::vector<CentromereAnchor> FindInitialCentromereAnchors(

@@ -1,67 +1,46 @@
 # Centromere input interface
 
-Centromere input stays within `ramag align`. RaMA-G does not locate centromeres
-automatically and does not require a species tree, a region-pairing table, or
-matching chromosome names.
+On Linux the normal build runs the complete anchored-path workflow with
+`ramag align -c`. The command aligns centromere sequences supplied as FASTA.
+Each input contains exactly one nonempty record. Plain and gzip FASTA use
+the same normalization rules.
 
-**Current stage:** Linux builds default to anchor-only export. `align -c` stops
-after original RaMA anchor recursion and before any WFA or gap alignment.
-The complete backend is retained but is not invoked on this route.
-Inversions, automatic orientation,
-region pairing and BED mixed alignment are not implemented. A disabled backend
-or BED-mode run fails with dependency error **5**, without genome fallback.
-The experimental [direction-region API](centromere-directions.md) is a separate
-library capability and does not change these default CLI semantics.
-
-## One centromere sequence on each side
-
-Use `-c` or its identical long alias `--centromere`. Each input must contain
-exactly one nonempty record. Plain/gzip FASTA and the existing normalization
-rules apply. Multiple records are rejected, never concatenated or implicitly paired.
-
-```bash
+```sh
 ramag align -c --reference reference_centromere.fa --query query_centromere.fa \
-  --output-prefix comparison --work-dir work --threads 4
+  --output-prefix comparison --threads 4
 ```
 
-The reported mode is `centromere-only`. This flag is a declaration by the user,
-not an automatic centromere detector. Both sequences are used in their supplied
-orientation; reverse-complement the query externally when required.
-Add `--print-effective-config` to inspect the source identities, scoring,
-thread budget and N policy without running the alignment.
-For `-c` only, omitting `--work-dir` creates per-run logs under
-`.ramag-work` beside the output prefix. Ordinary genome commands retain their
-existing explicit workspace requirement.
+RaMA-G predicts forward and reverse query intervals, searches for recursive
+primary anchors and copy branches, reviews endpoints and paths, and fills
+supported internal gaps with the `centrolign-3piece` model. In large direction
+gaps it first checks the original initial anchors and then searches locally
+when the existing evidence is insufficient and the window meets the resource
+and context criteria. All coordinates refer to the original input sequences.
 
-The current default exports `comparison.initial-anchors.tsv` and
-`comparison.final-anchors.tsv`. Both contain stable anchor IDs, sequence IDs
-and lengths, reference/query begin/end, strand, match length and source weight.
-Coordinates are zero-based half-open. Strand is `+` in the supplied orientation;
-there is no automatic reverse search. Empty anchor sets retain a header.
-Use final anchors for plotting and initial anchors to compare recursion effects.
-Do not connect anchors across unaligned gaps as if those gaps were aligned.
+The default standard outputs are `comparison.sam`, `comparison.paf` and
+`comparison.maf`. Select a subset with `--formats LIST` or provide repeatable
+`--output` paths with the same directory and base prefix. The command also
+publishes diagnostic TSVs alongside those outputs.
 
-`--output` and `--formats` are rejected in this stage. No PAF, SAM, delta,
-MAF or chain is produced. Effective configuration reports
-`centromere_stage=anchors-only` and `wfa_execution=disabled`.
+| Suffix | Contents |
+| --- | --- |
+| `.orientation-local-direction-repair-intervals.tsv` | Direction plan passed to recursive anchor search |
+| `.direction-initial-anchors.tsv` | Initial evidence from direction prediction |
+| `.initial-anchors.tsv`, `.final-anchors.tsv` | Primary anchors before and after recursion, with the applicable reviews |
+| `.copy-anchors.tsv`, `.copy-ambiguities.tsv` | Accepted copy anchors and separately recorded ambiguity groups |
+| `.alignment-segments.tsv`, `.alignment-gaps.tsv`, `.alignment-summary.tsv` | Path coordinates, CIGARs, gap status and run totals |
+| `.unplanned-core-reviews.tsv` | Local review of direction gaps and their candidate reference locations |
 
-### Retained complete backend (not the current CLI default)
+Sequence tails, regions without supported paths, and resource-limited gaps
+can remain unresolved. Read the segment coordinates and gap status to determine
+the extent of each alignment. See the [format contract](centromere-alignment-formats.md)
+and [stitching model](centromere-anchor-stitch.md).
 
-Only a build explicitly configured with internal
-`RAMAG_CENTROMERE_ANCHORS_ONLY=OFF` enables the complete CLI route. Then existing
-output options select PAF, SAM, delta, MAF or chain:
+The [direction-region API](centromere-directions.md) also exposes the planner for library use.
 
-```bash
-ramag align -c --reference ref.fa.gz --query query.fa.gz --threads 4 \
-  --output-prefix result --formats paf,sam,delta,maf,chain
-```
-
-The complete internal CIGAR consumes both sequences, including terminal gaps.
-PAF/SAM/delta/MAF preserve that consumption. UCSC chain has no terminal-gap
-fields: the existing writer projects the paired blocks and reports their
-actual coordinates, rather than inventing aligned bases. Paired-coordinate
-sets remain identical, but chain spans can exclude terminal unpaired bases.
-Chain cannot encode exact/mismatch distinctions or NM. Use PAF/SAM for those.
+Add `--print-effective-config` to inspect the mode, scoring and output formats.
+Omitting `--work-dir` places the run logs in `.ramag-work` beside the output prefix.
+A build with the centromere backend disabled reports dependency error **5**.
 
 Global genome options (`--seed-mode`, `--selection-mode`, `--min-match`,
 `--smem-min-occurrences`, `--min-cluster`, `--max-gap`, `--diag-diff`,
@@ -74,9 +53,8 @@ ambiguous input letters normalize deterministically to N; no random bases are
 generated. Anchor rules are source-compatible on ACGT; this N behavior is an
 explicit extension, not equivalence to RaMA's random-N preprocessing.
 
-See [source mapping and validation](centromere-rama-integration.md) for exact
-dependencies, safety patches and limitations. The retained complete backend is
-RaMA-anchor-constrained, not an unconstrained globally optimal alignment.
+See [source mapping and validation](centromere-rama-integration.md) for the
+original RaMA backend dependencies and safety patches.
 
 ## Full genomes with known centromere intervals
 

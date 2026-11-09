@@ -56,3 +56,16 @@ are maintained in this repository's history.
 The previous separate attribution directory and file-hash inventory were removed.
 Required notices are consolidated here and in the root license; third-party
 library licenses remain with each library.
+
+## Centrolign base-alignment kernels
+
+The private kernel subset in `third_party/centrolign_stitch` comes from
+[Centrolign](https://github.com/jeizenga/centrolign) commit
+`a604cbdcff2e22e643fc9e17d4679296ee5e42fe`, distributed under its retained
+[MIT license](third_party/centrolign_stitch/LICENSE). Its source and local patch
+manifests record provenance. Local changes isolate the namespace, account for
+kernel allocations and add cooperative cancellation. RaMA-G uses only fixed-endpoint
+linear-graph dynamic programming and unpruned wavefront alignment; upstream
+anchoring, graph merging, circular graphs and global build settings are excluded.
+An independent scorer checks the full piecewise-affine objective rather than
+upstream helper scoring functions. See the [interface description](docs/centromere-anchor-stitch.md).

@@ -4,6 +4,8 @@
 #include "centromere_orientation_unified_review.hpp"
 #include "centromere_orientation_known_counterchain.hpp"
 #include "centromere_orientation_local_direction_repair.hpp"
+#include "centromere_direction_island_audit.hpp"
+#include "centromere_direction_local_protection_integration.hpp"
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -18,9 +20,59 @@
 #endif
 
 namespace ramag {
+void WriteCentromereDirectionIslandContextReviews(std::ostream& o,const CentromereBlockResult& r) {
+  o<<"id\tblock_id\tchecks\tcomponents\toriginal_begin\toriginal_end\tcore_reference_begin\tcore_reference_end\tcore_query_begin\tcore_query_end\treference_explained\tquery_explained\treference_unsupported\tquery_unsupported\told_score\tscore\taccepted\treason\n";
+  for(const auto& x:r.direction_island_context_reviews)o<<x.id<<'\t'<<x.block_id<<'\t'<<x.checks<<'\t'<<x.components<<'\t'
+    <<x.original_begin<<'\t'<<x.original_end<<'\t'<<x.core_reference_begin<<'\t'<<x.core_reference_end<<'\t'
+    <<x.core_query_begin<<'\t'<<x.core_query_end<<'\t'<<x.reference_explained<<'\t'<<x.query_explained<<'\t'
+    <<x.reference_unsupported<<'\t'<<x.query_unsupported<<'\t'<<x.old_score<<'\t'<<x.score<<'\t'<<x.accepted<<'\t'<<x.reason<<'\n';
+  if(r.direction_island_context_budget_exhausted)o<<"0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\tremaining_batch_checks_exhausted\n";
+}
+void WriteCentromereDirectionPlanReviews(std::ostream& o,const CentromereBlockResult& r) {
+  o<<"id\tblock_id\tleft_index\tsource_id\tchecks\treference_begin\treference_end\tquery_begin\tquery_end\tstrand\tweight\taccepted\treason\n";
+  for(const auto& x:r.direction_plan_reviews)o<<x.id<<'\t'<<x.block_id<<'\t'<<x.left_index<<'\t'<<x.source_id<<'\t'<<x.checks<<'\t'
+    <<x.reference_begin<<'\t'<<x.reference_end<<'\t'<<x.query_begin<<'\t'<<x.query_end<<'\t'<<(x.strand==Strand::Forward?'+':'-')
+    <<'\t'<<x.weight<<'\t'<<x.accepted<<'\t'<<x.reason<<'\n';
+  if(r.direction_plan_review_budget_exhausted)o<<"0\t0\t0\t0\t"<<r.direction_plan_review_checks<<"\t0\t0\t0\t0\t+\t0\t0\tbatch_budget_exhausted\n";
+}
+void WriteCentromereDirectionLocalProtectionReviews(std::ostream& o,const CentromereBlockResult& result) {
+  o<<"id\tblock_id\tbegin\tend\tstrand\told_matched\tcounter_matched\tcandidate_same\tcandidate_opposite\tcandidate_unknown\trestored\tprotected_interval\tregion_changed\treason\n";
+  for(const auto& a:result.direction_local_protection_reviews)o<<a.id<<'\t'<<a.block_id<<'\t'<<a.begin<<'\t'<<a.end<<'\t'
+    <<(a.strand==Strand::Forward?'+':'-')<<'\t'<<a.old_matched<<'\t'<<a.counter_matched<<'\t'<<a.candidate_same<<'\t'
+    <<a.candidate_opposite<<'\t'<<a.candidate_unknown<<'\t'<<a.restored<<'\t'<<a.protected_interval<<'\t'<<a.region_changed<<'\t'<<a.reason<<'\n';
+}
+void WriteCentromereDirectionIslandAudits(std::ostream& o,const CentromereBlockResult& result) {
+  o<<"id\tblock_id\tleft_source_id\tright_source_id\tchecks\tbegin\tend\treference_begin\treference_end\tquery_begin\tquery_end\tstrand\tbackground\tweight\treference_covered\tquery_covered\treference_unsupported\tquery_unsupported\tscore\teligible\tretracted\treason\tsource_role\n";
+  for(const auto& a:result.direction_island_audits)o<<a.id<<'\t'<<a.block_id<<'\t'<<a.left_source_id<<'\t'<<a.right_source_id<<'\t'<<a.checks<<'\t'
+    <<a.begin<<'\t'<<a.end<<'\t'<<a.reference_begin<<'\t'<<a.reference_end<<'\t'<<a.query_begin<<'\t'<<a.query_end<<'\t'
+    <<(a.strand==Strand::Forward?'+':'-')<<'\t'<<(a.background==Strand::Forward?'+':'-')<<'\t'<<a.weight<<'\t'
+    <<a.reference_covered<<'\t'<<a.query_covered<<'\t'<<a.reference_unsupported<<'\t'<<a.query_unsupported<<'\t'<<a.score<<'\t'
+    <<a.eligible<<'\t'<<a.retracted<<'\t'<<a.reason<<'\t'<<a.source_role<<'\n';
+}
+void WriteCentromereOverlapVariants(std::ostream& o,const CentromereBlockResult& r) {
+  o<<"variant_id\tstrand\toriginal_reference_begin\toriginal_query_begin\toriginal_length\treference_begin\tquery_begin\tlength\ttrim_front\ttrim_back\n";
+  std::uint64_t id=0;
+  for(const auto& v:r.overlap_variants)o<<++id<<'\t'<<(v.strand==Strand::Forward?'+':'-')<<'\t'
+    <<v.original.reference_begin<<'\t'<<v.original.query_begin<<'\t'<<v.original.length<<'\t'
+    <<v.variant.reference_begin<<'\t'<<v.variant.query_begin<<'\t'<<v.variant.length<<'\t'
+    <<v.trim_front<<'\t'<<v.trim_back<<'\n';
+}
+void WriteCentromereOverlapSummary(std::ostream& o,const CentromereBlockResult& r) {
+  o<<"pairs_examined\tvariants_added\tbudget_exhausted\tnonuniform_nodes_skipped\tlocal_support_rejections\n"<<r.overlap_pairs_examined<<'\t'
+    <<r.overlap_variants_added<<'\t'<<r.overlap_budget_exhausted<<'\t'<<r.overlap_nonuniform_nodes_skipped<<'\t'<<r.overlap_local_support_rejections<<'\n';
+}
 bool CentromereCliBlocks() noexcept {return RAMAG_CENTROMERE_BLOCK_ALIGNMENT!=0;}
+bool CentromereCliFullAlignment() noexcept {
+  return !CentromereCliAnchorsOnly() && !CentromereCliBlocks() && !RAMAG_CENTROMERE_DIRECTIONS;
+}
 CentromereBlockOptions CentromereCliBlockOptions() {
   CentromereBlockOptions o;
+  o.direction_island_context_review=RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW!=0;
+  o.direction_plan_review=RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW!=0;
+  o.direction_local_protection=RAMAG_CENTROMERE_DIRECTION_LOCAL_PROTECTION!=0;
+  o.overlap_compatibility=RAMAG_CENTROMERE_OVERLAP_COMPATIBILITY!=0;
+  o.direction_evidence_repair=RAMAG_CENTROMERE_DIRECTION_EVIDENCE_REPAIR!=0;
+  o.direction_island_audit=RAMAG_CENTROMERE_DIRECTION_ISLAND_AUDIT!=0;
 #if RAMAG_CENTROMERE_JOINT_BLOCKS
   o.planning_strategy=CentromereBlockStrategy::JointLocalBlocksV2;
 #endif
@@ -333,6 +385,12 @@ CentromereBlockResult PlanCentromereBlocks(Length rlength,Length qlength,
 
 CentromereBlockResult FindCentromereDirectionRegions(const SequenceRecord& reference,
     const SequenceRecord& query,const CentromereBlockOptions& options) {
+  if(options.direction_local_protection && (!options.direction_island_audit || !options.repair_inherited_directions ||
+     !options.orientation_audit_known_blocks || options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9))
+    throw CentromereInputError("local direction protection requires island audit and audited inherited-direction repair with orientation-evidence-v9");
+  if(options.direction_island_audit && (!options.repair_inherited_directions ||
+     options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9))
+    throw CentromereInputError("direction island audit requires inherited-direction repair with orientation-evidence-v9");
   if(options.repair_drift_consistent_gaps && !options.repair_inherited_directions)
     throw CentromereInputError("drift-consistent repair requires inherited-direction repair");
   if(options.repair_inherited_directions && !options.review_known_block_counterchains)
@@ -382,6 +440,8 @@ CentromereBlockResult FindCentromereDirectionRegions(const SequenceRecord& refer
   if(options.orientation_bridge_unknown_gaps &&
      (!options.orientation_connected_gaps || options.planning_strategy!=CentromereBlockStrategy::OrientationEvidenceV9))
     throw CentromereInputError("unknown-gap bridging requires connected orientation-evidence-v9");
+  if(options.direction_island_context_review && !options.direction_island_audit)
+    throw CentromereInputError("island context review requires the existing island audit");
   Inputs(reference,query,options);
   const auto start=Clock::now();
   const bool joint=options.planning_strategy!=CentromereBlockStrategy::InitialDirectionBlocksV1;
@@ -399,6 +459,9 @@ CentromereBlockResult FindCentromereDirectionRegions(const SequenceRecord& refer
   for(auto& a:reverse)a.query_begin=query.size()-a.query_begin-a.length;
   const double initial_seconds=Elapsed(start);const auto planning=Clock::now();
   CentromereBlockResult out;
+  detail::FrozenLocalDirectionProtection protection_baseline;
+  CentromereBlockOptions selection_options=options;
+  double protection_baseline_seconds=0;std::uint64_t protection_baseline_peak=0;
   if(joint) {
     if(options.progress_callback)options.progress_callback("centromere-joint-planning",0,1);
     Length fs=0,rs=0;for(const auto& a:forward)fs+=a.length;for(const auto& a:reverse)rs+=a.length;
@@ -406,10 +469,26 @@ CentromereBlockResult FindCentromereDirectionRegions(const SequenceRecord& refer
     discovered.root_candidates=std::move(candidates);discovered.initial_forward=std::move(forward);
     discovered.initial_reverse=std::move(reverse);
     if(options.observation_callback)options.observation_callback(discovered);
+    if(options.direction_local_protection) {
+      const auto baseline_start=Clock::now();auto baseline_options=options;
+      baseline_options.overlap_compatibility=false;baseline_options.direction_local_protection=false;
+      baseline_options.direction_island_audit=false;baseline_options.observation_callback={};
+      // Replan moves the one frozen raw store; it is moved back, never searched
+      // again or retained twice. No old region/unified local_search is repeated.
+      auto baseline=detail::ReplanDirectionRegions(reference.size(),query.size(),discovered.root_candidates,baseline_options,
+        rs>fs?Strand::Reverse:Strand::Forward,reference.bases,query.bases);
+      protection_baseline_peak=baseline.planner_reserved_bytes;
+      discovered.root_candidates=std::move(baseline.root_candidates);
+      protection_baseline=detail::FreezeLocalDirectionProtectionBaseline(baseline);
+      if(protection_baseline.capacity_bytes>=options.planner_memory_limit_bytes)
+        throw AlignmentError("compact direction baseline leaves no candidate planner budget");
+      selection_options.planner_memory_limit_bytes-=protection_baseline.capacity_bytes;
+      protection_baseline_seconds=Elapsed(baseline_start);
+    }
     if(options.planning_strategy==CentromereBlockStrategy::HierarchicalDirectionRegionsV4 ||
        options.planning_strategy==CentromereBlockStrategy::DirectionRegionsOnlyV5) {
       try {
-        out=detail::ReplanDirectionRegions(reference.size(),query.size(),discovered.root_candidates,options,
+        out=detail::ReplanDirectionRegions(reference.size(),query.size(),discovered.root_candidates,selection_options,
           rs>fs ? Strand::Reverse : Strand::Forward);
       } catch(const detail::CentromereBudgetExceeded& e) {
         out.refinement_partial_reason=e.what();
@@ -423,17 +502,23 @@ CentromereBlockResult FindCentromereDirectionRegions(const SequenceRecord& refer
         unknown.direction_known=false;unknown.tentative=true;unknown.status="unresolved";unknown.reason="direction_unresolved";
         out.blocks.push_back(std::move(unknown));
       }
-    } else out=detail::ReplanDirectionRegions(reference.size(),query.size(),discovered.root_candidates,options,
+    } else out=detail::ReplanDirectionRegions(reference.size(),query.size(),discovered.root_candidates,selection_options,
       rs>fs ? Strand::Reverse : Strand::Forward,reference.bases,query.bases);
     out.initial_forward=std::move(discovered.initial_forward);out.initial_reverse=std::move(discovered.initial_reverse);
   } else out=PlanCentromereBlocks(reference.size(),query.size(),std::move(forward),std::move(reverse));
   auto local_search=[&](const CentromereRegionSearch& task,Strand strand) {
-    return detail::SearchCentromereRegionCandidates(reference,query,task,strand,options);
+    return detail::SearchCentromereRegionCandidates(reference,query,task,strand,selection_options);
   };
-  if(options.review_region_chains)detail::ReviewOrientationRegions(reference.bases,query.bases,out,options,local_search);
-  if(options.review_unified_gaps)detail::ReviewUnifiedOrientationGaps(reference.bases,query.bases,out,options,local_search);
-  if(options.review_known_block_counterchains)detail::ReviewKnownBlockCounterchains(query.bases,out,options);
-  if(options.repair_inherited_directions)detail::RepairInheritedDirections(query.bases,out,options);
+  if(options.review_region_chains)detail::ReviewOrientationRegions(reference.bases,query.bases,out,selection_options,local_search);
+  if(options.review_unified_gaps)detail::ReviewUnifiedOrientationGaps(reference.bases,query.bases,out,selection_options,local_search);
+  if(options.review_known_block_counterchains)detail::ReviewKnownBlockCounterchains(query.bases,out,selection_options);
+  if(options.repair_inherited_directions)detail::RepairInheritedDirections(query.bases,out,selection_options);
+  if(options.direction_local_protection) {
+    out.direction_local_protection_baseline_seconds=protection_baseline_seconds;
+    out.planner_reserved_bytes=std::max(out.planner_reserved_bytes+protection_baseline.capacity_bytes,protection_baseline_peak);
+    detail::ApplyLocalDirectionProtection(query.size(),protection_baseline,out,options);
+  }
+  if(options.direction_island_audit)detail::ApplyDirectionIslandAudit(reference.size(),query.size(),out,options,reference.bases,query.bases);
   out.initial_seconds=initial_seconds;out.planning_seconds=Elapsed(planning);
   if(options.observation_callback)options.observation_callback(out);
   return out;

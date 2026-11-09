@@ -2,11 +2,10 @@
 
 ## Identity and scientific scope
 
-Current CLI default: `RAMAG_CENTROMERE_ANCHORS_ONLY=ON`. `align -c` calls
-`FindCentromereAnchors`, exports initial/final TSVs and returns before interval
-partitioning or WFA. `AlignCentromeres` remains a separate complete library API;
-the complete-path description below is not a claim that anchor TSVs are full
-alignments. No WFA execution is required for the anchor-only export tests.
+The default Linux CLI runs [anchored-path alignment](centromere-interface.md).
+This page describes the original source-derived RaMA backend. The library
+exposes that backend through `AlignCentromeres` and provides sparse recursion
+through `FindCentromereAnchors`.
 
 This backend uses the rules of
 [pinglu-zhang/RaMA](https://github.com/pinglu-zhang/RaMA/tree/7bc89c4902bc9254f18cc4b05c4bf491a10bd7cb)

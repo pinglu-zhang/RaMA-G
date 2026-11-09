@@ -42,10 +42,14 @@ void OrientationEvidence(const Vec<Node>& nodes,Length qlength,std::string_view 
     rows.resize(size);
   };
   // Neutrality is based on the complete, actual two-axis mapping rectangle.
-  Vec<std::size_t> order(nodes.size(),0,&budget);std::iota(order.begin(),order.end(),0);
+  Vec<std::size_t> order(&budget);
+  for(std::size_t i=0;i<nodes.size();++i)if(!nodes[i].overlap_variant)order.push_back(i);
   auto box=[&](auto i){const auto& a=nodes[i].anchor;return std::tuple{a.reference_begin,a.query_begin,a.length};};
   std::sort(order.begin(),order.end(),[&](auto a,auto b){return std::pair{box(a),a}<std::pair{box(b),b};});
   Vec<bool> neutral(nodes.size(),false,&budget);
+  // End-clipped compatibility variants are alternate representations of the
+  // same evidence, not independent votes or roots for provenance lookup.
+  for(std::size_t i=0;i<nodes.size();++i)neutral[i]=nodes[i].overlap_variant;
   for(std::size_t i=0;i<order.size();) {
     auto j=i;unsigned signs=0;
     while(j<order.size() && box(order[j])==box(order[i])){signs|=nodes[order[j]].strand==Strand::Forward?1U:2U;++j;}
@@ -53,11 +57,15 @@ void OrientationEvidence(const Vec<Node>& nodes,Length qlength,std::string_view 
     i=j;
   }
   Vec<Interval> forward(&budget),reverse(&budget),known(&budget),unknown(&budget);
+  detail::DirectionWindowWitnessIndex forward_witness(&budget),reverse_witness(&budget);
   for(std::size_t i=0;i<nodes.size();++i)if(!neutral[i]) {
     const auto& a=nodes[i].anchor;
     (nodes[i].strand==Strand::Forward?forward:reverse).push_back({a.query_begin,a.query_begin+a.length});
+    if(options.direction_evidence_repair)
+      (nodes[i].strand==Strand::Forward?forward_witness:reverse_witness).Add(a.query_begin,a.query_begin+a.length);
   }
   merge(forward);merge(reverse);
+  if(options.direction_evidence_repair){forward_witness.Finalize();reverse_witness.Finalize();}
   for(const auto& b:out.blocks)if(b.direction_known && b.query_begin<b.query_end)known.push_back({b.query_begin,b.query_end});
   merge(known);Position cursor=0;
   for(const auto& b:known){if(cursor<b.begin)unknown.push_back({cursor,b.begin});cursor=b.end;}
@@ -108,8 +116,15 @@ void OrientationEvidence(const Vec<Node>& nodes,Length qlength,std::string_view 
       return own>=options.count_min_anchors && other<=own/options.count_dominance_ratio &&
         other_length<=own_length/options.count_dominance_ratio;
     };
-    w.label=dominates(w.forward,w.reverse,w.forward_length,w.reverse_length)?'+':
-      dominates(w.reverse,w.forward,w.reverse_length,w.forward_length)?'-':
+    // A whole-window exact match contributes its observed coverage even if
+    // its midpoint is outside this window. It remains ONE witness; we never
+    // inflate the public count or split it into artificial independent votes.
+    const bool coherent_forward=detail::CoherentDirectionWindowDominates(options.direction_evidence_repair,
+      forward_witness.Covers(w.begin,w.end),w.forward_length,w.reverse_length,options.count_dominance_ratio);
+    const bool coherent_reverse=detail::CoherentDirectionWindowDominates(options.direction_evidence_repair,
+      reverse_witness.Covers(w.begin,w.end),w.reverse_length,w.forward_length,options.count_dominance_ratio);
+    w.label=(dominates(w.forward,w.reverse,w.forward_length,w.reverse_length) || coherent_forward)?'+':
+      (dominates(w.reverse,w.forward,w.reverse_length,w.forward_length) || coherent_reverse)?'-':
       std::max(w.forward,w.reverse)>=options.count_min_anchors?'?':'.';
     append(out.orientation_windows,w);
   }
@@ -208,7 +223,8 @@ void OrientationEvidence(const Vec<Node>& nodes,Length qlength,std::string_view 
     return std::tuple{sign==Strand::Forward?0U:1U,a.reference_begin>=u,
       a.reference_begin>=u?a.reference_begin-u:u-a.reference_begin,a.reference_begin};
   };
-  order.resize(nodes.size());std::iota(order.begin(),order.end(),0);
+  order.clear();
+  for(std::size_t i=0;i<nodes.size();++i)if(!nodes[i].overlap_variant)order.push_back(i);
   std::sort(order.begin(),order.end(),[&](auto a,auto b){return diagonal(nodes[a].anchor,nodes[a].strand)<diagonal(nodes[b].anchor,nodes[b].strand);});
   for(std::size_t i=0;i<out.root_candidates.size();++i) {
     if(i%8192==0)Check(options);
@@ -238,7 +254,7 @@ void OrientationEvidence(const Vec<Node>& nodes,Length qlength,std::string_view 
       [&](const auto& row) {
         append(out.orientation_known_intervals,row);
         known.push_back({row.begin,row.end});
-      },[&]{Check(options);});
+      },[&]{Check(options);},options.direction_evidence_repair);
     merge(known);
     out.orientation_audit_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-audit_start).count();
   }

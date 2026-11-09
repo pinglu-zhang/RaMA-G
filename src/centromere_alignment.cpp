@@ -156,7 +156,8 @@ static AlignmentResult RunCentromereCore(const SequenceRecord& reference,
   stats.reference_bases=reference.size(); stats.query_bases=query.size();
   stats.reference_ambiguous_bases=static_cast<Length>(std::count(reference.bases.begin(),reference.bases.end(),'N'));
   stats.query_ambiguous_bases=static_cast<Length>(std::count(query.bases.begin(),query.bases.end(),'N'));
-  stats.actual_seed_route="rama-source-rare-recursive-v1";
+  stats.actual_seed_route=options.corrected_recursive_boundaries
+      ? "rama-source-rare-recursive-half-open-v1" : "rama-source-rare-recursive-v1";
   stats.chaining_route="rama-source-collinear-v1";
   stats.seed_requested_threads=options.worker_threads;
   stats.seed_scheduled_threads=stats.seed_worker_threads=options.worker_threads;
@@ -170,7 +171,17 @@ static AlignmentResult RunCentromereCore(const SequenceRecord& reference,
   {
     rama_source::AnchorFinder finder(sequences,"",
         options.worker_threads==1 ? 0 : options.worker_threads,false,false,100,
-        [&options]{Check(options,"centromere-anchors");});
+        [&options]{Check(options,"centromere-anchors");}, options.corrected_recursive_boundaries);
+    rama_source::RecursionTraceSink trace;
+    if (options.recursion_observer) {
+      trace = [&](const rama_source::RecursionTrace& node) {
+        const auto& box = node.interval;
+        options.recursion_observer({node.node_id, node.parent_id, node.depth, node.rare_level,
+            box.pos1, Position(box.pos1) + box.len1, box.pos2, Position(box.pos2) + box.len2,
+            node.candidate_count, node.selected_anchor_count, node.stop_reason,
+            node.guard_status, node.query_added, node.reference_added, node.cache_bytes});
+      };
+    }
     anchors=finder.lanuchAnchorSearching([&](const rama_source::RareMatchPairs& first) {
       if (!anchor_output) return;
       for (const auto& a:first) {
@@ -185,7 +196,13 @@ static AlignmentResult RunCentromereCore(const SequenceRecord& reference,
             throw AlignmentError("initial RaMA anchor is not canonical exact match");
         anchor_output->initial.push_back({a.first_pos,qb,a.match_length,a.weight});
       }
-    });
+    }, trace);
+    if(anchor_output) {
+      const auto& g=finder.nodeCoverageGuardSummary();
+      anchor_output->coverage_guard={g.baseline_nodes!=0,g.proposal_seconds_sum,g.selection_seconds,g.refill_seconds,
+        g.baseline_nodes,g.cached_nodes,g.cache_exhausted_nodes,g.proposal_budget_exhausted_nodes,
+        g.accepted_nodes,g.reused_subtrees,g.refill_searches,g.refill_nodes,g.refill_nonempty_nodes,g.cache_bytes_retained};
+    }
   } // Release the index before any WFA workspace is allocated.
   stats.seed_seconds=Seconds(start);
   stats.selected_seed_count=stats.merged_seed_count=anchors.size();

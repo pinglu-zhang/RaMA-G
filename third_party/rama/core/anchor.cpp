@@ -22,8 +22,261 @@
 
 #include "anchor.h"
 #include <cstring>
+#include <limits>
+#include <chrono>
+#include <exception>
 
 namespace ramag::rama_source {
+
+
+NodeCoverageGuardOptions DefaultNodeCoverageGuardOptions() noexcept {
+    NodeCoverageGuardOptions out;
+#if RAMAG_CENTROMERE_NODE_COVERAGE_GUARD
+    out.enabled = true;
+#endif
+#ifdef RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES
+    out.cache_limit_bytes = RAMAG_CENTROMERE_NODE_COVERAGE_CACHE_BYTES;
+#endif
+    return out;
+}
+namespace {
+using GuardClock = std::chrono::steady_clock;
+double GuardSeconds(GuardClock::time_point since) {
+    return std::chrono::duration<double>(GuardClock::now()-since).count();
+}
+bool SamePairs(const RareMatchPairs& a, const RareMatchPairs& b) {
+    if (a.size()!=b.size()) return false;
+    for (std::size_t i=0;i<a.size();++i)
+        if (a[i].first_pos!=b[i].first_pos || a[i].second_pos!=b[i].second_pos ||
+            a[i].match_length!=b[i].match_length) return false;
+    return true;
+}
+void ValidateOrderedCoverage(const RareMatchPairs& pairs) {
+    uint_t rend=0,qend=0;
+    for (const auto& p:pairs) {
+        if (!p.match_length || p.match_length>U_MAX-p.first_pos ||
+            p.match_length>U_MAX-p.second_pos || p.first_pos<rend || p.second_pos<qend)
+            throw std::invalid_argument("coverage guard requires ordered nonoverlapping pairs");
+        rend=p.first_pos+p.match_length;qend=p.second_pos+p.match_length;
+    }
+}
+std::uint64_t AddedAxisCoverage(const RareMatchPairs& old, const RareMatchPairs& proposal, bool query) {
+    std::uint64_t added=0;
+    std::size_t j=0;
+    const auto begin=[&](const RareMatchPair& p){return query?p.second_pos:p.first_pos;};
+    for (const auto& p:proposal) {
+        const auto b=begin(p),e=static_cast<uint_t>(b+p.match_length);
+        while(j<old.size() && begin(old[j])+old[j].match_length<=b) ++j;
+        std::uint64_t covered=0;
+        for (auto k=j;k<old.size() && begin(old[k])<e;++k) {
+            const auto lo=std::max(b,begin(old[k]));
+            const auto hi=std::min(e,static_cast<uint_t>(begin(old[k])+old[k].match_length));
+            if (hi>lo) covered+=hi-lo;
+        }
+        const auto delta=static_cast<std::uint64_t>(p.match_length)-covered;
+        if(delta>std::numeric_limits<std::uint64_t>::max()-added)
+            throw std::overflow_error("coverage guard count overflow");
+        added+=delta;
+    }
+    return added;
+}
+void ReleaseProposals(Anchor& node, const char* status) noexcept {
+    RareMatchPairs{}.swap(node.overlap_proposal);
+    node.proposal_ready=false;
+    if(status) node.guard_status=status;
+    for(auto* child:node.children) ReleaseProposals(*child,status);
+}
+bool SameInterval(const Interval& a, const Interval& b) {
+    return a.pos1==b.pos1 && a.len1==b.len1 && a.pos2==b.pos2 && a.len2==b.len2;
+}
+bool ContainsInterval(const Interval& a, const Interval& b) {
+    return b.pos1>=a.pos1 && b.pos1-a.pos1<=a.len1 && b.len1<=a.len1-(b.pos1-a.pos1) &&
+           b.pos2>=a.pos2 && b.pos2-a.pos2<=a.len2 && b.len2<=a.len2-(b.pos2-a.pos2);
+}
+Anchor* FindReusableGap(Anchor& node, const Interval& gap, const std::vector<Anchor*>& used) {
+    if(SameInterval(node.search_interval,gap) &&
+       std::find(used.begin(),used.end(),&node)==used.end()) return &node;
+    for(auto* child:node.children)
+        if(ContainsInterval(child->search_interval,gap))
+            if(auto* found=FindReusableGap(*child,gap,used)) return found;
+    return nullptr;
+}
+void Reparent(Anchor& node, Anchor* parent, uint_t depth) noexcept {
+    node.parent=parent;node.depth=depth;
+    for(auto* child:node.children) Reparent(*child,&node,depth+1);
+}
+void CountRefillNodes(const Anchor& node, NodeCoverageGuardSummary& summary) {
+    ++summary.refill_nodes;
+    if(node.search_interval.len1 && node.search_interval.len2) ++summary.refill_nonempty_nodes;
+    for(const auto* child:node.children) CountRefillNodes(*child,summary);
+}
+} // namespace
+
+NodeCoverageGain MeasureNodeCoverageGain(const RareMatchPairs& baseline,
+                                         const RareMatchPairs& proposal) {
+    ValidateOrderedCoverage(baseline);ValidateOrderedCoverage(proposal);
+    return {AddedAxisCoverage(baseline,proposal,true),AddedAxisCoverage(baseline,proposal,false)};
+}
+
+std::vector<Anchor*> SelectNodeCoverageRepairs(Anchor& root,
+    const RareMatchPairs& baseline, const std::function<void()>& interrupt) {
+    ValidateOrderedCoverage(baseline);
+    std::vector<Anchor*> pending{&root}, accepted;
+    while(!pending.empty()) {
+        if(interrupt) interrupt();
+        auto* node=pending.back();pending.pop_back();
+        if(node->cache_exhausted || node->proposal_budget_exhausted) {
+            ReleaseProposals(*node,"kept_ancestor");
+            node->guard_status=node->proposal_budget_exhausted
+                ? "proposal_budget_exhausted" : node->cache_failure_status;
+            continue;
+        }
+        if(node->proposal_ready) {
+            ValidateOrderedCoverage(node->overlap_proposal);
+            node->query_added=AddedAxisCoverage(baseline,node->overlap_proposal,true);
+            node->reference_added=AddedAxisCoverage(baseline,node->overlap_proposal,false);
+            if(node->query_added && node->reference_added) {
+                node->guard_status="accepted";
+                accepted.push_back(node);
+            } else {
+                ReleaseProposals(*node,"kept_ancestor");
+                node->guard_status="kept_no_dual_gain";
+            }
+            continue; // Both acceptance and failed proposal stop descendants.
+        }
+        node->guard_status="no_proposal";
+        for(auto it=node->children.rbegin();it!=node->children.rend();++it) pending.push_back(*it);
+    }
+    return accepted;
+}
+
+void AnchorFinder::cacheNodeCoverageProposal(Anchor& node, const RareMatchPairs& raw,
+                                            const RareMatchPairs& original) {
+    if(node.suppress_proposals) return;
+    // At most four entries per original (original + three clipped alternatives).
+    // This conservative per-node reservation also caps the transient result vector.
+    if(raw.size()>node.cache_allowance/(4*sizeof(RareMatchPair))) {
+        node.cache_exhausted=true;node.guard_status="cache_exhausted";return;
+    }
+    const auto started=GuardClock::now();
+    try {
+        RareMatchOverlapAudit audit;
+        auto proposal=FindOverlapCompatibleRareMatchChain(raw,interrupt,
+            [&](const RareMatchPair& p) {
+                const auto& box=node.search_interval;
+                const auto q=box.pos2+first_seq_len+1;
+                if(!p.match_length || p.first_pos<box.pos1 || p.first_pos-box.pos1>box.len1 ||
+                   p.match_length>box.len1-(p.first_pos-box.pos1) || p.second_pos<q ||
+                   p.second_pos-q>box.len2 || p.match_length>box.len2-(p.second_pos-q))
+                    throw std::out_of_range("coverage proposal outside node");
+                for(uint_t k=0;k<p.match_length;++k) {
+                    if(interrupt && (k&4095U)==0) interrupt();
+                    if(!canonical(concat_data[p.first_pos+k]) ||
+                       concat_data[p.first_pos+k]!=concat_data[p.second_pos+k])
+                        throw std::logic_error("coverage proposal is not canonical exact");
+                }
+            },audit);
+        if(audit.budget_exhausted) {
+            node.proposal_budget_exhausted=true;node.guard_status="proposal_budget_exhausted";
+        } else if(!SamePairs(proposal,original)) {
+            if(proposal.capacity()>node.cache_allowance/sizeof(RareMatchPair)) {
+                node.cache_exhausted=true;node.guard_status="cache_exhausted";
+            } else {
+                node.cache_bytes=proposal.capacity()*sizeof(RareMatchPair);
+                node.overlap_proposal=std::move(proposal);node.proposal_ready=true;
+                node.guard_status="cached";
+            }
+        }
+    } catch(const std::bad_alloc&) {
+        RareMatchPairs{}.swap(node.overlap_proposal);
+        node.cache_bytes=0;node.proposal_ready=false;node.cache_exhausted=true;
+        node.cache_failure_status="cache_allocation_failed";
+        node.guard_status=node.cache_failure_status;
+    }
+    node.proposal_seconds=GuardSeconds(started);
+}
+
+void AnchorFinder::applyNodeCoverageGuard(ThreadPool& pool, Anchor& root,
+                                         const RareMatchPairs& baseline) {
+    // No worker runs while this phase reads the old tree or updates ownership.
+    std::vector<Anchor*> scan{&root};
+    while(!scan.empty()) {
+        const auto* node=scan.back();scan.pop_back();
+        ++coverage_guard_summary.baseline_nodes;
+        coverage_guard_summary.cached_nodes+=node->proposal_ready;
+        coverage_guard_summary.cache_exhausted_nodes+=node->cache_exhausted;
+        coverage_guard_summary.proposal_budget_exhausted_nodes+=node->proposal_budget_exhausted;
+        coverage_guard_summary.cache_bytes_retained+=node->cache_bytes;
+        coverage_guard_summary.proposal_seconds_sum+=node->proposal_seconds;
+        for(auto* child:node->children) scan.push_back(child);
+    }
+    if(coverage_guard_summary.cache_bytes_retained>coverage_guard_options.cache_limit_bytes)
+        throw std::logic_error("coverage proposal cache exceeded deterministic budget");
+    const auto selected_at=GuardClock::now();
+    const auto selected=SelectNodeCoverageRepairs(root,baseline,interrupt);
+    coverage_guard_summary.selection_seconds=GuardSeconds(selected_at);
+    coverage_guard_summary.accepted_nodes=selected.size();
+    capture_coverage_proposals=false;
+    for(auto* node:selected) {
+        if(interrupt) interrupt();
+        const auto refill_at=GuardClock::now();
+        const auto gaps=SplitHalfOpenGaps(node->overlap_proposal,node->search_interval,first_seq_len);
+        std::vector<Anchor*> replacement;
+        std::vector<Anchor*> reused;
+        std::vector<std::unique_ptr<Anchor>> fresh;
+        replacement.reserve(gaps.size());reused.reserve(gaps.size());fresh.reserve(gaps.size());
+        try {
+            for(const auto& gap:gaps) {
+                Anchor* old=nullptr;
+                for(auto* child:node->children) {
+                    if(ContainsInterval(child->search_interval,gap))
+                        old=FindReusableGap(*child,gap,reused);
+                    if(old) break;
+                }
+                if(old) { replacement.push_back(old);reused.push_back(old);continue; }
+                auto child=std::make_unique<Anchor>(node->depth+1,node);
+                child->guard_status="refill_plain";
+                auto* raw=child.get();fresh.push_back(std::move(child));replacement.push_back(raw);
+                ++coverage_guard_summary.refill_searches;
+                if(thread_num) pool.enqueue([this,&pool,raw,gap] {
+                    locateAnchor(pool,raw->depth,0,raw,gap);
+                });
+                else locateAnchor(pool,raw->depth,0,raw,gap);
+            }
+            if(thread_num) pool.waitAllTasksDone();
+        } catch(...) {
+            // Main-thread allocation/enqueue failure must not release task owners
+            // before every already-enqueued worker has stopped using them.
+            const auto error=std::current_exception();
+            if(thread_num) {try {pool.waitAllTasksDone();} catch(...) {}}
+            std::rethrow_exception(error);
+        }
+        for(const auto& child:fresh) CountRefillNodes(*child,coverage_guard_summary);
+        // Validate and allocate before detaching any owner. The subsequent
+        // transfer has no throwing operations and cannot orphan a reused tree.
+        std::vector<Anchor**> owner_slots;
+        owner_slots.reserve(reused.size());
+        for(auto* old:reused) {
+            auto& siblings=old->parent->children;
+            const auto it=std::find(siblings.begin(),siblings.end(),old);
+            if(it==siblings.end()) throw std::logic_error("reused gap lost its owner");
+            owner_slots.push_back(&*it);
+        }
+        for(std::size_t i=0;i<reused.size();++i) {
+            *owner_slots[i]=nullptr;
+            ReleaseProposals(*reused[i],"reused_old_subtree");
+            Reparent(*reused[i],node,node->depth+1);
+        }
+        coverage_guard_summary.reused_subtrees+=reused.size();
+        auto retired=std::move(node->children);
+        node->children=std::move(replacement);
+        node->rare_match_pairs.swap(node->overlap_proposal);
+        RareMatchPairs{}.swap(node->overlap_proposal);node->proposal_ready=false;
+        for(auto& child:fresh) child.release();
+        for(auto* child:retired) delete child;
+        coverage_guard_summary.refill_seconds+=GuardSeconds(refill_at);
+    }
+}
 
 
 void saveIntervalsToCSV(const Intervals& intervals, const std::string& filename) {
@@ -54,10 +307,10 @@ void saveIntervalsToCSV(const Intervals& intervals, const std::string& filename)
 }
 
 // Constructor for AnchorFinder class
-AnchorFinder::AnchorFinder(std::vector<SequenceInfo>& data, std::string save_file_path, uint_t thread_num, bool load_from_disk, bool save_to_disk, uint_t max_match_count, std::function<void()> interruption) :
+AnchorFinder::AnchorFinder(std::vector<SequenceInfo>& data, std::string save_file_path, uint_t thread_num, bool load_from_disk, bool save_to_disk, uint_t max_match_count, std::function<void()> interruption, bool corrected_boundaries, NodeCoverageGuardOptions coverage_guard) :
 	save_file_path(save_file_path),
 	thread_num(thread_num),
-	max_match_count(max_match_count), interrupt(std::move(interruption)) {
+	max_match_count(max_match_count), corrected_recursive_boundaries(corrected_boundaries), coverage_guard_options(coverage_guard), interrupt(std::move(interruption)) {
 	first_seq_len = data[0].seq_len;
 	second_seq_len = data[1].seq_len;
 	concatSequence(data); // Concatenate sequences from input data
@@ -281,13 +534,19 @@ void AnchorFinder::constructISAParallel(uint_t thread_num) {
 // Initiates the process of searching for anchors in the sequences.
 // Depending on the configuration, it either launches a parallel search using a thread pool
 // or executes a single-threaded search.
-RareMatchPairs AnchorFinder::lanuchAnchorSearching(std::function<void(const RareMatchPairs&)> initial_observer) {
+RareMatchPairs AnchorFinder::lanuchAnchorSearching(std::function<void(const RareMatchPairs&)> initial_observer,
+    const RecursionTraceSink& trace_observer) {
+    collect_trace = static_cast<bool>(trace_observer);
+    coverage_guard_summary={};
+    coverage_guard_active=corrected_recursive_boundaries && coverage_guard_options.enabled;
+    capture_coverage_proposals=coverage_guard_active;
 	logger.info() << "Begin to search anchors" << std::endl;
 	
 	ThreadPool pool(thread_num); // Use thread pool for potential parallel execution
 	uint_t depth = 0;
 	auto owner = std::make_unique<Anchor>(depth);
     Anchor* root = owner.get(); // Create root anchor node
+    if(coverage_guard_active) root->cache_allowance=coverage_guard_options.cache_limit_bytes;
 	Interval interval(0, first_seq_len, 0, second_seq_len); // Define interval
 	uint_t task_id = 0;
 	if (thread_num) {
@@ -299,11 +558,31 @@ RareMatchPairs AnchorFinder::lanuchAnchorSearching(std::function<void(const Rare
 	else {
 		locateAnchor(pool, depth, task_id, root, interval); // Fallback to sequential search
 	}
+    if(coverage_guard_active) {
+        const auto old_final=verifyAnchors(root->mergeRareMatchPairs());
+        applyNodeCoverageGuard(pool,*root,old_final);
+    }
 	if (initial_observer) initial_observer(root->rare_match_pairs);
 
 
 	// RareMatchPairs final_anchors = root->mergeRareMatchPairs(); // Merge rare match pairs from the root anchor
 	RareMatchPairs final_anchors = verifyAnchors(root->mergeRareMatchPairs()); // Merge rare match pairs from the root anchor
+    if (trace_observer) {
+        // Traverse only after waitAllTasksDone, never in worker completion order.
+        std::vector<std::pair<const Anchor*, std::uint64_t>> pending{{root, 0}};
+        std::uint64_t next_id = 0;
+        while (!pending.empty()) {
+            const auto [node, parent_id] = pending.back();
+            pending.pop_back();
+            const std::uint64_t node_id = ++next_id;
+            trace_observer({node_id, parent_id, node->depth, node->rare_level,
+                node->search_interval, node->candidate_count,
+                static_cast<std::uint64_t>(node->rare_match_pairs.size()), node->stop_reason,
+                node->guard_status,node->query_added,node->reference_added,node->cache_bytes});
+            for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
+                pending.emplace_back(*it, node_id);
+        }
+    }
 
 
 
@@ -315,8 +594,12 @@ RareMatchPairs AnchorFinder::lanuchAnchorSearching(std::function<void(const Rare
 RareMatchPairs AnchorFinder::findInitialAnchors(const RareCandidateSink& observer) {
     ThreadPool pool(0);
     Anchor root;
-    initial_only=true;
+    coverage_guard_active=false;capture_coverage_proposals=false;
+    // std::function copying may throw. Enter root-only mode only after the
+    // observer has been copied successfully, so a failed setup leaves full
+    // search usable on this same finder.
     initial_candidate_observer=observer;
+    initial_only=true;
     try {
         locateAnchor(pool,0,0,&root,Interval(0,first_seq_len,0,second_seq_len));
     } catch (...) {initial_only=false;initial_candidate_observer={};throw;}
@@ -383,6 +666,15 @@ void AnchorFinder::locateAnchor(ThreadPool& pool, uint_t depth, uint_t task_id, 
 	// Log the start of a new task with its depth and task ID for debugging.
 	logger.debug() << "Task " << task_id << " of depth " << depth << " begins" << std::endl;
 
+    root->search_interval = interval;
+    if(coverage_guard_active)
+        root->guard_status=capture_coverage_proposals
+            ? (root->suppress_proposals?"kept_ancestor":"no_proposal") : "refill_plain";
+    if (corrected_recursive_boundaries &&
+        (interval.pos1 > first_seq_len || interval.len1 > first_seq_len - interval.pos1 ||
+         interval.pos2 > second_seq_len || interval.len2 > second_seq_len - interval.pos2))
+        throw std::out_of_range("RaMA recursive search region outside input");
+
 	// Calculate new depth for recursive calls.
 	uint_t new_depth = depth + 1;
 
@@ -394,6 +686,7 @@ void AnchorFinder::locateAnchor(ThreadPool& pool, uint_t depth, uint_t task_id, 
 
 	// Return early if either sequence segment is empty.
 	if (fst_len == 0 || scd_len == 0) {
+        root->stop_reason = "empty_axis";
 		return;
 	}
 
@@ -458,14 +751,38 @@ void AnchorFinder::locateAnchor(ThreadPool& pool, uint_t depth, uint_t task_id, 
 	// Initialize RareMatchFinder and find optimal rare match pairs.
 	RareMatchFinder rare_match_finder(concat_data, new_SA, new_LCP, new_DA, first_seq_start, fst_len, second_seq_start, scd_len);
 	rare_match_finder.interruption = interrupt;
-	RareMatchPairs optimal_pairs = rare_match_finder.findRareMatch(max_match_count,
-        initial_only ? initial_candidate_observer : RareCandidateSink{});
+    RareCandidateSink candidate_observer;
+    if (collect_trace || coverage_guard_active) {
+        candidate_observer = [&](const RareCandidate& candidate) {
+            ++root->candidate_count;
+            root->rare_level = candidate.level;
+            if (initial_only && initial_candidate_observer) initial_candidate_observer(candidate);
+        };
+    } else if (initial_only) {
+        candidate_observer = initial_candidate_observer;
+    }
+    RareMatchPairs optimal_pairs = rare_match_finder.findRareMatch(max_match_count, candidate_observer,
+#if RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY
+        corrected_recursive_boundaries && !coverage_guard_active
+#else
+        false
+#endif
+        , capture_coverage_proposals && !root->suppress_proposals
+            ? std::function<void(const RareMatchPairs&,const RareMatchPairs&)>(
+                [&](const RareMatchPairs& raw,const RareMatchPairs& selected) {
+                    cacheNodeCoverageProposal(*root,raw,selected);
+                })
+            : std::function<void(const RareMatchPairs&,const RareMatchPairs&)>{}
+    );
 
 	if (optimal_pairs.empty())
 		return;
 
 	// Convert rare match pairs to intervals for further exploration.
-	Intervals rare_match_intervals = RareMatchPairs2Intervals(optimal_pairs, interval, this->first_seq_len);
+	Intervals rare_match_intervals = corrected_recursive_boundaries
+        ? SplitHalfOpenGaps(optimal_pairs, interval, this->first_seq_len)
+        : RareMatchPairs2Intervals(optimal_pairs, interval, this->first_seq_len);
+    root->stop_reason = "split";
 
 	// Update the anchor's rare match pairs with the optimal ones found.
 	root->rare_match_pairs = optimal_pairs;
@@ -473,9 +790,21 @@ void AnchorFinder::locateAnchor(ThreadPool& pool, uint_t depth, uint_t task_id, 
 
 	// Recursively explore further intervals with new anchors.
 	uint_t new_task_id = 0;
+    // Deterministic subtree quotas, assigned before enqueue; no worker wins a
+    // global first-come cache allocation race. Empty-axis children need no quota.
+    std::size_t quota_children=0,quota_index=0;
+    for(const auto& box:rare_match_intervals) quota_children+=box.len1 && box.len2;
+    const auto remaining=root->cache_allowance-root->cache_bytes;
 
 	for (const auto& new_interval : rare_match_intervals) {
 		auto child = std::make_unique<Anchor>(new_depth, root);
+        if(capture_coverage_proposals) {
+            child->suppress_proposals=root->suppress_proposals || root->cache_exhausted || root->proposal_budget_exhausted;
+            if(!child->suppress_proposals && new_interval.len1 && new_interval.len2) {
+                child->cache_allowance=remaining/quota_children+(quota_index<remaining%quota_children);
+                ++quota_index;
+            }
+        }
 		root->children.emplace_back(child.get());
 		Anchor* new_anchor = child.release();
 		// Parallel or sequential execution based on configuration.
@@ -558,6 +887,47 @@ Intervals AnchorFinder::RareMatchPairs2Intervals(const RareMatchPairs& rare_matc
 	intervals.emplace_back(end);
 
 	return intervals;
+}
+
+Intervals AnchorFinder::SplitHalfOpenGaps(const RareMatchPairs& pairs, Interval interval,
+    uint_t fst_length) {
+    using Wide = std::uint64_t;
+    const Wide limit = std::numeric_limits<uint_t>::max();
+    const Wide r_end = Wide(interval.pos1) + interval.len1;
+    const Wide q_end = Wide(interval.pos2) + interval.len2;
+    const Wide q_offset = Wide(fst_length) + 1;
+    if (r_end > fst_length || q_end > limit || q_offset + q_end > limit)
+        throw std::out_of_range("RaMA half-open parent interval overflow or outside input");
+    Intervals gaps;
+    if (pairs.empty()) {
+        gaps.push_back(interval);
+        return gaps;
+    }
+    gaps.reserve(pairs.size() + 1);
+    Wide r_cursor = interval.pos1, q_cursor = interval.pos2;
+    const auto append_gap = [&](Wide r, Wide re, Wide q, Wide qe) {
+        if (r > re || q > qe || r < interval.pos1 || re > r_end ||
+            q < interval.pos2 || qe > q_end)
+            throw std::invalid_argument("RaMA child gap outside its parent");
+        // A positive accepted anchor strictly reduces both axes of every gap.
+        if (re > r && qe > q && (re-r >= interval.len1 || qe-q >= interval.len2))
+            throw std::invalid_argument("RaMA recursive gap does not shrink");
+        gaps.emplace_back(static_cast<uint_t>(r), static_cast<uint_t>(re-r),
+                          static_cast<uint_t>(q), static_cast<uint_t>(qe-q));
+    };
+    for (const auto& pair : pairs) {
+        if (!pair.match_length || Wide(pair.second_pos) < q_offset)
+            throw std::invalid_argument("RaMA half-open anchor has invalid length or query coordinate");
+        const Wide r = pair.first_pos, q = Wide(pair.second_pos) - q_offset;
+        const Wide re = r + pair.match_length, qe = q + pair.match_length;
+        if (r < r_cursor || q < q_cursor || re > r_end || qe > q_end)
+            throw std::invalid_argument("RaMA half-open anchors overlap or leave the parent");
+        append_gap(r_cursor, r, q_cursor, q);
+        r_cursor = re;
+        q_cursor = qe;
+    }
+    append_gap(r_cursor, r_end, q_cursor, q_end);
+    return gaps;
 }
 
 // Converts global index to local index, adjusting for the concatenation offset.

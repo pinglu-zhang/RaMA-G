@@ -108,6 +108,23 @@ struct RareCandidate {
 };
 using RareCandidateSink = std::function<void(const RareCandidate&)>;
 
+// Internal source-backend audit. Original candidate observations never include
+// these bounded compatibility alternatives.
+struct RareMatchOverlapAudit {
+    std::size_t original_count{}, variants_added{};
+    std::uint64_t pairs_examined{};
+    std::uint64_t baseline_paired_bases{},retained_baseline_paired_bases{};
+    std::uint64_t secondary_tie_updates{},local_support_rejections{};
+    bool budget_exhausted{};
+};
+// Pure chain seam used by the backend and small independent correctness tests.
+// Inputs are actual exact matches, in source concatenated coordinates.
+RareMatchPairs FindOverlapCompatibleRareMatchChain(const RareMatchPairs& pairs,
+    const std::function<void()>& interruption,
+    const std::function<void(const RareMatchPair&)>& validate_variant,
+    RareMatchOverlapAudit& audit);
+
+
 void saveRareMatchPairsToCSV(const RareMatchPairs& pairs, const std::string& filename, uint_t fst_len);
 RareMatchPairs readRareMatchPairsFromCSV(const std::string& filename, uint_t fst_len);
 
@@ -182,12 +199,15 @@ private:
 public:
     // Integration-only cancellation probe; never prunes candidates.
     std::function<void()> interruption;
+    RareMatchOverlapAudit overlap_audit;
     // Constructor initializes the finder with concatenated data and associated arrays.
     explicit RareMatchFinder(unsigned char* _concat_data, std::vector<uint_t>& _SA, std::vector<int_t>& _LCP, std::vector<int_da>& _DA, uint_t _first_seq_start, uint_t _first_seq_len, uint_t _second_seq_start, uint_t _second_seq_len);
 
     // Finds rare matches up to a specified maximum count.
     RareMatchPairs findRareMatch(uint_t max_match_count = 100,
-                                const RareCandidateSink& observer = {});
+                                const RareCandidateSink& observer = {},
+                                 bool overlap_compatibility = false,
+        const std::function<void(const RareMatchPairs&, const RareMatchPairs&)>& original_chain_observer = {});
     void visitCandidates(uint_t max_match_count, bool supplemental_levels,
                          const RareCandidateSink& sink);
 };

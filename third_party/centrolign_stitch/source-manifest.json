@@ -1,0 +1,112 @@
+{
+  "upstream_url": "https://github.com/jeizenga/centrolign",
+  "commit": "a604cbdcff2e22e643fc9e17d4679296ee5e42fe",
+  "license": "MIT",
+  "files": [
+    {
+      "upstream_path": "include/centrolign/alignment.hpp",
+      "vendored_path": "include/centrolign_stitch/alignment.hpp",
+      "upstream_sha256": "22637aabd35a6207e618ae5d2127346f1b93d51223716d70e25c46c7c93dc820"
+    },
+    {
+      "upstream_path": "include/centrolign/range_min_query.hpp",
+      "vendored_path": "include/centrolign_stitch/range_min_query.hpp",
+      "upstream_sha256": "4347cc795ab34c6bd89f99aa377429dadfeae0de7b8b0fdfa135d4ad46333c66"
+    },
+    {
+      "upstream_path": "include/centrolign/utility.hpp",
+      "vendored_path": "include/centrolign_stitch/utility.hpp",
+      "upstream_sha256": "4eeb3f435fe78c607a0a17830b259a15fcd9369e33f84ca939af4daee41ac605"
+    },
+    {
+      "upstream_path": "include/centrolign/logging.hpp",
+      "vendored_path": "include/centrolign_stitch/logging.hpp",
+      "upstream_sha256": "a2c3fb56b8f597a9bf608b9724ef520b6bb5a67f3f06a7d6b4113a06236ce4f9"
+    },
+    {
+      "upstream_path": "include/centrolign/graph.hpp",
+      "vendored_path": "include/centrolign_stitch/graph.hpp",
+      "upstream_sha256": "2191eefcee75f258cbfea9f0ab99997f59c20c3b4b1a14dbade836c1e145049e"
+    },
+    {
+      "upstream_path": "include/centrolign/orthogonal_max_search_tree.hpp",
+      "vendored_path": "include/centrolign_stitch/orthogonal_max_search_tree.hpp",
+      "upstream_sha256": "6cd2f099f041251d62aa6de2bfa6006a9de7c251c207deb045b754a250828194"
+    },
+    {
+      "upstream_path": "include/centrolign/max_search_tree.hpp",
+      "vendored_path": "include/centrolign_stitch/max_search_tree.hpp",
+      "upstream_sha256": "d755ef599378fe33acc6e45e0bd283efacaa58e0e48bd6aed64d55c3b5a23915"
+    },
+    {
+      "upstream_path": "include/centrolign/shortest_path.hpp",
+      "vendored_path": "include/centrolign_stitch/shortest_path.hpp",
+      "upstream_sha256": "85c65d9b874e95c2ab06630c728a9b779851aee7efcedb6f67e83d1d9a7bc4e6"
+    },
+    {
+      "upstream_path": "include/centrolign/topological_order.hpp",
+      "vendored_path": "include/centrolign_stitch/topological_order.hpp",
+      "upstream_sha256": "0fe08417d420b7baaa58c5705fada81f7e7565fe4e8d7135848a4b9f9a1015ca"
+    },
+    {
+      "upstream_path": "include/centrolign/superbubble_distance_oracle.hpp",
+      "vendored_path": "include/centrolign_stitch/superbubble_distance_oracle.hpp",
+      "upstream_sha256": "1d1c41a406f75a392bfb5ad3e590d21a4488bac9279a99455b10117e08cc15c7"
+    },
+    {
+      "upstream_path": "include/centrolign/source_sink_graph.hpp",
+      "vendored_path": "include/centrolign_stitch/source_sink_graph.hpp",
+      "upstream_sha256": "1d0e215fa2f31ebbb32beeee832b298db3cbcda4c7084b04940bae6d360b6ab7"
+    },
+    {
+      "upstream_path": "include/centrolign/superbubbles.hpp",
+      "vendored_path": "include/centrolign_stitch/superbubbles.hpp",
+      "upstream_sha256": "5768760ac506bc75cf4d09db16000258a6c550b11f11efe37a4a4cb56f711418"
+    },
+    {
+      "upstream_path": "include/centrolign/structure_tree.hpp",
+      "vendored_path": "include/centrolign_stitch/structure_tree.hpp",
+      "upstream_sha256": "6ca2e8c3f310810debfc32978242b93bbdd57be3d0e9a457205b3ba6ca1cb81c"
+    },
+    {
+      "upstream_path": "include/centrolign/modify_graph.hpp",
+      "vendored_path": "include/centrolign_stitch/modify_graph.hpp",
+      "upstream_sha256": "00086841370f39a42fb8aa621044cb80795c683690880e1b16957aaa5ebeb567"
+    },
+    {
+      "upstream_path": "include/centrolign/target_reachability.hpp",
+      "vendored_path": "include/centrolign_stitch/target_reachability.hpp",
+      "upstream_sha256": "471e09102041803606a006baa3eb15fae2b435fdc13660731b4d4051f008dcd6"
+    },
+    {
+      "upstream_path": "include/centrolign/minmax_distance.hpp",
+      "vendored_path": "include/centrolign_stitch/minmax_distance.hpp",
+      "upstream_sha256": "6e5775f39fb0395121c3c041831238b655eb00b158538541707d303ffe7232a3"
+    },
+    {
+      "upstream_path": "src/alignment.cpp",
+      "vendored_path": "src/alignment.cpp",
+      "upstream_sha256": "c72885b754804c663fcf8bf8561c8f4f668729c36d8adf830d72d2f41fc3de9f"
+    },
+    {
+      "upstream_path": "src/graph.cpp",
+      "vendored_path": "src/graph.cpp",
+      "upstream_sha256": "dcec8920331dbb887c4328b5db730e04ea8503a7c71fb88fa8bed48fa1f177d5"
+    },
+    {
+      "upstream_path": "src/utility.cpp",
+      "vendored_path": "src/utility.cpp",
+      "upstream_sha256": "e0dc1346907f41d85f6236e45913fc3cd826b69edb7dd734e3c4217380d00b2e"
+    },
+    {
+      "upstream_path": "src/logging.cpp",
+      "vendored_path": "src/logging.cpp",
+      "upstream_sha256": "9b055b8d5e4f2a4e578c758fd22be0fbdd4c39aabf13b8243e16db7f213d33a7"
+    },
+    {
+      "upstream_path": "LICENSE",
+      "vendored_path": "LICENSE",
+      "upstream_sha256": "9fc108d40aff61f66979b44dfb090789c3a3bd07039b752af481bee428155501"
+    }
+  ]
+}

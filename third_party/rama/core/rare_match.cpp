@@ -20,6 +20,9 @@
  // Contact: pingluzhang@outlook.com
  // Created: 2024-02-20
 #include "rare_match.h"
+#include "centromere_overlap_compatibility.hpp"
+#include <limits>
+#include <tuple>
 
 namespace ramag::rama_source {
 
@@ -210,14 +213,39 @@ uint_t RareMatchFinder::getMinMatchLength(std::vector<uint_t>& match_pos) {
 
 
 // Finds rare matches up to a specified maximum count within the LCP array.
-RareMatchPairs RareMatchFinder::findRareMatch(uint_t max_match_count, const RareCandidateSink& observer) {
+RareMatchPairs RareMatchFinder::findRareMatch(uint_t max_match_count, const RareCandidateSink& observer,
+    bool overlap_compatibility,
+    const std::function<void(const RareMatchPairs&, const RareMatchPairs&)>& original_chain_observer) {
     RareMatchPairs pairs;
     visitCandidates(max_match_count, false, [&](const RareCandidate& c) {
         pairs.push_back(c.pair);
         if (observer) observer(c);
     });
     std::sort(pairs.begin(), pairs.end());
-    return findOptimalPairs(pairs);
+    overlap_audit = {};
+    if (!overlap_compatibility) {
+        auto selected = findOptimalPairs(pairs);
+        if (original_chain_observer) original_chain_observer(pairs, selected);
+        return selected;
+    }
+    if (original_chain_observer)
+        throw std::invalid_argument("original-chain observer requires original chaining");
+    return FindOverlapCompatibleRareMatchChain(pairs, interruption,
+        [&](const RareMatchPair& p) {
+            if (!p.match_length || p.first_pos < first_seq_start ||
+                p.first_pos - first_seq_start > first_seq_len ||
+                p.match_length > first_seq_len - (p.first_pos - first_seq_start) ||
+                p.second_pos < second_seq_start ||
+                p.second_pos - second_seq_start > second_seq_len ||
+                p.match_length > second_seq_len - (p.second_pos - second_seq_start))
+                throw std::out_of_range("RaMA overlap variant outside search region");
+            for (uint_t k=0;k<p.match_length;++k) {
+                if (interruption && (k & 4095U)==0) interruption();
+                const auto c=concat_data[p.first_pos+k];
+                if (!canonical(c) || c != concat_data[p.second_pos+k])
+                    throw std::logic_error("RaMA overlap variant is not canonical exact");
+            }
+        }, overlap_audit);
 }
 
 void RareMatchFinder::visitCandidates(uint_t max_match_count,
@@ -427,8 +455,167 @@ double gapCost(uint_t first_gap, uint_t second_gap) {
         /*return 0.01 * avg_seed_length * std::abs(static_cast<int>(first_gap - second_gap)) + 0.5 * std::log2(std::abs(static_cast<int>(first_gap - second_gap)) + 1);*/
 }
 
+static RareMatchPairs OriginalRareMatchChain(const RareMatchPairs&,
+    const std::function<void()>&);
+
+// A clipped end is usable only on a real edge to its recorded original
+// witness. Cropped atoms cannot win alone; legacy +0.1 cannot manufacture
+// their support. Original-to-original scoring is deliberately unchanged.
+RareMatchPairs FindOverlapCompatibleRareMatchChain(const RareMatchPairs& pairs,
+    const std::function<void()>& interruption,
+    const std::function<void(const RareMatchPair&)>& validate_variant,
+    RareMatchOverlapAudit& audit) {
+    audit = {}; audit.original_count = pairs.size();
+    if (pairs.empty()) return {};
+    // Reuse the same raw set: no index traversal, candidate expansion, or new
+    // search is performed to establish the pre-compatibility correspondence.
+    const auto old_chain=OriginalRareMatchChain(pairs,interruption);
+    for(const auto& p:old_chain)audit.baseline_paired_bases+=p.match_length;
+    constexpr auto none=std::numeric_limits<std::size_t>::max();
+    if (pairs.size()>static_cast<std::size_t>(I_MAX)/4)
+        throw std::length_error("RaMA overlap alternatives exceed traceback range");
+    auto check=[&] {if(interruption)interruption();};
+    const auto proposals=ramag::detail::FindAnchorEndClips(pairs.size(),[&](std::size_t i) {
+        const auto& p=pairs[i];
+        return ramag::CentromereAnchor{p.first_pos,p.second_pos,p.match_length,p.weight};
+    },ramag::Strand::Forward,0,std::pmr::get_default_resource(),check);
+    audit.pairs_examined=proposals.pairs_examined;
+    audit.local_support_rejections=proposals.local_support_rejections;
+    audit.budget_exhausted=proposals.budget_exhausted;
+    struct Node {
+        RareMatchPair pair;
+        std::size_t original{}, front_witness{none}, back_witness{none};
+        bool variant{};
+    };
+    std::vector<Node> nodes;
+    nodes.reserve(pairs.size());
+    for(std::size_t i=0;i<pairs.size();++i)nodes.push_back({pairs[i],i,none,none,false});
+    if(!proposals.budget_exhausted) {
+        const auto add=[&](std::size_t i,ramag::Length front,ramag::Length back) {
+            if(!front && !back)return;
+            const auto& original=pairs[i];const auto& cut=proposals.clips[i];
+            if(front>=original.match_length || back>=original.match_length-front)return;
+            auto p=original;
+            p.first_pos+=static_cast<uint_t>(front);p.second_pos+=static_cast<uint_t>(front);
+            p.match_length-=static_cast<uint_t>(front+back);
+            p.weight=original.weight*static_cast<double>(p.match_length)/original.match_length;
+            const auto supported=[&](std::size_t witness,double cost,bool front_end) {
+                if(witness>=pairs.size())return false;
+                const auto& w=pairs[witness];
+                if(cost && cost>=std::min(p.weight,w.weight))return false;
+                const auto& left=front_end?w:p;const auto& right=front_end?p:w;
+                if(right.first_pos<left.first_pos+left.match_length ||
+                   right.second_pos<left.second_pos+left.match_length)return false;
+                const bool local=ramag::detail::AnchorClipGapHasLocalSupport(
+                    right.first_pos-left.first_pos-left.match_length,
+                    right.second_pos-left.second_pos-left.match_length,left.weight,right.weight);
+                if(!local)++audit.local_support_rejections;
+                return local;
+            };
+            if((front && !supported(cut.front_witness,cut.front_cost,true)) ||
+               (back && !supported(cut.back_witness,cut.back_cost,false)))return;
+            if(validate_variant)validate_variant(p);
+            nodes.push_back({p,i,front?cut.front_witness:none,back?cut.back_witness:none,true});
+            ++audit.variants_added;
+        };
+        for(std::size_t i=0;i<pairs.size();++i) {
+            check();const auto& c=proposals.clips[i];
+            add(i,c.front,0);add(i,0,c.back);
+            if(c.front && c.back)add(i,c.front,c.back);
+        }
+    }
+    // This also covers proposal-budget exhaustion: the source DP and its
+    // original floating-point/tie order are returned without reinterpretation.
+    if(!audit.variants_added) {
+        audit.retained_baseline_paired_bases=audit.baseline_paired_bases;
+        return old_chain;
+    }
+    // Stable ties retain original candidate ordering before alternatives.
+    std::stable_sort(nodes.begin(),nodes.end(),[](const auto& a,const auto& b) {return a.pair<b.pair;});
+    const auto negative=-std::numeric_limits<double>::infinity();
+    struct Rank {
+        double score{-std::numeric_limits<double>::infinity()};
+        std::uint64_t retained{};
+        long double original_support{},original_length{};
+    };
+    // Scientific score remains primary. Only exact score ties use retention;
+    // no epsilon can silently promote a scientifically lower-scoring chain.
+    const auto better=[](const Rank& a,const Rank& b) {
+        return std::tie(a.score,a.retained,a.original_support,a.original_length)>
+               std::tie(b.score,b.retained,b.original_support,b.original_length);
+    };
+    const auto old_intersection=[&](const RareMatchPair& p) {
+        std::uint64_t n=0;
+        auto it=std::lower_bound(old_chain.begin(),old_chain.end(),p.first_pos,
+            [](const auto& a,uint_t r){return a.first_pos+a.match_length<=r;});
+        for(;it!=old_chain.end() && it->first_pos<p.first_pos+p.match_length;++it) {
+            const auto begin=std::max(p.first_pos,it->first_pos);
+            const auto end=std::min(p.first_pos+p.match_length,it->first_pos+it->match_length);
+            if(p.second_pos+(begin-p.first_pos)==it->second_pos+(begin-it->first_pos))n+=end-begin;
+        }
+        return n;
+    };
+    std::vector<Rank> own(nodes.size()),scores(nodes.size());
+    for(std::size_t i=0;i<nodes.size();++i) {
+        check();const auto& n=nodes[i];const auto& original=pairs[n.original];
+        own[i]={n.pair.weight,old_intersection(n.pair),
+            static_cast<long double>(n.pair.match_length)*original.weight,
+            static_cast<long double>(n.pair.match_length)*original.match_length};
+    }
+    std::vector<int_t> backtracks(nodes.size(),-1);
+    std::size_t best=none;Rank best_rank;
+    for(std::size_t i=0;i<nodes.size();++i) {
+        check();const auto& current=nodes[i];const auto& a=current.pair;
+        if(current.front_witness==none)scores[i]=own[i];
+        for(std::size_t j=i;j-- >0;) {
+            if((j & 65535U)==0)check();
+            const auto& previous=nodes[j];const auto& b=previous.pair;
+            if(scores[j].score==negative || a.first_pos<b.first_pos+b.match_length ||
+               a.second_pos<b.second_pos+b.match_length)continue;
+            if((current.front_witness!=none && current.front_witness!=previous.original) ||
+               (previous.back_witness!=none && previous.back_witness!=current.original))continue;
+            // Each proposal repaired this overlap at exactly one end. Its
+            // witness may trim the far end, but not the same connecting end.
+            if(current.front_witness!=none && previous.back_witness!=none)continue;
+            const auto first_gap=a.first_pos-b.first_pos;
+            const auto second_gap=a.second_pos-b.second_pos;
+            const auto delta=first_gap>=second_gap ? first_gap-second_gap : second_gap-first_gap;
+            const auto cost=(current.variant || previous.variant)
+                ? 2.0*std::log2(static_cast<double>(delta)+1.0)
+                : gapCost(first_gap,second_gap);
+            // Recheck final weights: a witness may itself have been clipped.
+            if(current.variant || previous.variant) {
+                if(cost>=std::min(a.weight,b.weight))continue;
+                if(!ramag::detail::AnchorClipGapHasLocalSupport(
+                    first_gap-b.match_length,second_gap-b.match_length,b.weight,a.weight)) {
+                    ++audit.local_support_rejections;continue;
+                }
+            }
+            const auto gain=a.weight-cost;
+            Rank next=scores[j];next.score+=gain>0 ? gain : 0.1;
+            next.retained+=own[i].retained;
+            next.original_support+=own[i].original_support;
+            next.original_length+=own[i].original_length;
+            if(better(next,scores[i])) {
+                if(next.score==scores[i].score)++audit.secondary_tie_updates;
+                scores[i]=next;backtracks[i]=static_cast<int_t>(j);
+            }
+        }
+        // A back-clipped anchor still owes a witnessed successor. Front-only
+        // variants cannot initialize, so neither kind can become a singleton.
+        if(current.back_witness==none && better(scores[i],best_rank)) {best=i;best_rank=scores[i];}
+    }
+    if(best==none)return {};
+    audit.retained_baseline_paired_bases=best_rank.retained;
+    RareMatchPairs selected;
+    for(int_t i=static_cast<int_t>(best);i!=-1;i=backtracks[i])selected.push_back(nodes[i].pair);
+    std::reverse(selected.begin(),selected.end());
+    return selected;
+}
+
 // Finds the optimal sequence of rare match pairs based on a dynamic programming approach that maximizes the total weight.
-RareMatchPairs RareMatchFinder::findOptimalPairs(const RareMatchPairs& rare_match_pairs) {
+static RareMatchPairs OriginalRareMatchChain(const RareMatchPairs& rare_match_pairs,
+    const std::function<void()>& interruption) {
     if (rare_match_pairs.empty()) {
         return {}; // Return an empty vector if input is empty.
     }
@@ -478,6 +665,11 @@ RareMatchPairs RareMatchFinder::findOptimalPairs(const RareMatchPairs& rare_matc
     // Reverse the sequence to get the correct order.
     std::reverse(optimal_pairs.begin(), optimal_pairs.end());
     return optimal_pairs; // Return the optimal sequence of pairs.
+}
+
+
+RareMatchPairs RareMatchFinder::findOptimalPairs(const RareMatchPairs& pairs) {
+    return OriginalRareMatchChain(pairs,interruption);
 }
 
 

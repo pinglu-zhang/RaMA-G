@@ -1,6 +1,6 @@
 # Experimental direction-region API
 
-The default `align -c` command exports RaMA anchors in the supplied orientation.
+The default `align -c` workflow predicts directions and aligns supported paths. See the [centromere CLI](centromere-interface.md).
 Automatic direction-region planning is an opt-in library capability. It is not
 an inversion caller or complete base-pair alignment, and it does not resolve
 which reference repeat copy corresponds to every inferred query interval.
@@ -48,7 +48,7 @@ the public defaults are not a claim of benchmark-equivalent performance.
 The CMake equivalent of the v2 flag is
 `RAMAG_CENTROMERE_REPAIR_DRIFT_CONSISTENT_GAPS`, also OFF by default. CMake
 configuration validates the required preceding options. These settings do not
-change the default anchor-only CLI into the direction-region route by themselves.
+select the direction-only diagnostic route by themselves.
 
 ## Results and interpretation
 

@@ -112,6 +112,10 @@ std::pair<LocalSolution,LocalSolution> SolveLocalBoth(const Vec<Node>& nodes,con
       for(std::uint32_t family=0;family<(regional ? 2U : 1U);++family) {
         TailsTo(endpoint,nodes,family ? *regional : graph,work,options,out);
         for(const auto first:work.visited) {
+          // A front-clipped node still owes its preceding witness. Back-end
+          // obligations and all actual witness connections are checked in the
+          // reverse DAG and local graph, so unrelated nodes cannot bypass it.
+          if(nodes[first].clipping.front!=none)continue;
           const auto& tail=work.tails[first];const auto item=LocalItem(first,endpoint,nodes,tail.support,tail.weight);
           forward.Add(item,first,endpoint,family,out);reverse.Add(item,first,endpoint,family,out);
         }

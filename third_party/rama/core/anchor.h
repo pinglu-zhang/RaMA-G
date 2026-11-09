@@ -30,6 +30,7 @@
 #include "RMQ.h"
 #include <thread>
 #include <mutex>
+#include <cstdint>
 
 namespace ramag::rama_source {
 
@@ -58,12 +59,56 @@ using Intervals = std::vector<Interval>;
 
 void saveIntervalsToCSV(const Intervals& intervals, const std::string& filename);
 
+struct RecursionTrace {
+    std::uint64_t node_id{}, parent_id{};
+    uint_t depth{}, rare_level{};
+    Interval interval;
+    std::uint64_t candidate_count{}, selected_anchor_count{};
+    const char* stop_reason{"no_matches"};
+    const char* guard_status{"disabled"};
+    std::uint64_t query_added{}, reference_added{}, cache_bytes{};
+};
+using RecursionTraceSink = std::function<void(const RecursionTrace&)>;
+
+struct NodeCoverageGuardOptions {
+    bool enabled{false};
+    // Retained proposal-vector capacity; excludes ordinary solver workspace.
+    std::uint64_t cache_limit_bytes{67108864};
+};
+// Resolve PRIVATE build definitions in one translation unit.
+NodeCoverageGuardOptions DefaultNodeCoverageGuardOptions() noexcept;
+
+struct NodeCoverageGuardSummary {
+    double proposal_seconds_sum{}, selection_seconds{}, refill_seconds{};
+    std::uint64_t baseline_nodes{}, cached_nodes{}, cache_exhausted_nodes{}, proposal_budget_exhausted_nodes{};
+    std::uint64_t accepted_nodes{}, reused_subtrees{}, refill_searches{}, refill_nodes{};
+    std::uint64_t refill_nonempty_nodes{}, cache_bytes_retained{};
+};
+struct NodeCoverageGain { std::uint64_t query_added{}, reference_added{}; };
+// Inputs must be individually ordered, nonoverlapping exact-anchor chains.
+// Coverage is actual paired positions, never the bounding box between anchors.
+NodeCoverageGain MeasureNodeCoverageGain(const RareMatchPairs& baseline,
+                                         const RareMatchPairs& proposal);
+
 struct Anchor {
 	uint_t depth;
 	Anchor* parent;
     // Stable recursion ownership; no task may outlive the root.
 	std::vector<Anchor*> children;
 	RareMatchPairs rare_match_pairs;
+    // Only this node's worker writes these fields; observers run after pool drain.
+    Interval search_interval;
+    uint_t rare_level{};
+    std::uint64_t candidate_count{};
+    const char* stop_reason{"no_matches"};
+    const char* guard_status{"disabled"};
+    std::uint64_t query_added{}, reference_added{}, cache_bytes{};
+    std::uint64_t cache_allowance{};
+    RareMatchPairs overlap_proposal;
+    double proposal_seconds{};
+    bool proposal_ready{false}, cache_exhausted{false}, suppress_proposals{false};
+    bool proposal_budget_exhausted{false};
+    const char* cache_failure_status{"cache_exhausted"};
 
 	// Constructor initializes depth and parent
 	Anchor(uint_t d = 0, Anchor* p = nullptr) : depth(d), parent(p) {}
@@ -96,7 +141,11 @@ struct Anchor {
 	}
 };
 
-
+// Select a top-down antichain. A failed proposal or exhausted cache freezes its
+// complete old subtree; a node with no proposal may pass through to children.
+// No sequence search or truth information is used here.
+std::vector<Anchor*> SelectNodeCoverageRepairs(Anchor& root,
+    const RareMatchPairs& baseline, const std::function<void()>& interrupt = {});
 
 class AnchorFinder : public Serializable {
 private:
@@ -107,6 +156,11 @@ private:
 	uint_t max_match_count; // Maximum number of rare matches to find
 	bool initial_only{false}; // Separate root-only entry; original recursion defaults unchanged.
     RareCandidateSink initial_candidate_observer;
+    bool corrected_recursive_boundaries{false};
+    bool collect_trace{false};
+    NodeCoverageGuardOptions coverage_guard_options;
+    NodeCoverageGuardSummary coverage_guard_summary;
+    bool coverage_guard_active{false}, capture_coverage_proposals{false};
 
 	unsigned char* concat_data{}; // Concatenated sequence data
 
@@ -151,18 +205,27 @@ private:
 	// Locates anchors using a given thread pool, recursive depth, and intervals
 	void locateAnchor(ThreadPool& pool, uint_t depth, uint_t task_id, Anchor* root, Interval interval);
 
+    void applyNodeCoverageGuard(ThreadPool& pool, Anchor& root,
+                                const RareMatchPairs& baseline);
+    void cacheNodeCoverageProposal(Anchor& node, const RareMatchPairs& raw,
+                                   const RareMatchPairs& original);
 	RareMatchPairs verifyAnchors(const RareMatchPairs& rare_match_pairs);
 
 
 public:
 	// Constructor initializes AnchorFinder with sequence data and optional parallel processing
-	explicit AnchorFinder(std::vector<SequenceInfo>& data, std::string save_file_path, uint_t thread_num = 0, bool load_from_disk = false, bool save_to_disk = true, uint_t max_match_count = 100, std::function<void()> interrupt = {});
+	explicit AnchorFinder(std::vector<SequenceInfo>& data, std::string save_file_path, uint_t thread_num = 0, bool load_from_disk = false, bool save_to_disk = true, uint_t max_match_count = 100, std::function<void()> interrupt = {}, bool corrected_recursive_boundaries = false, NodeCoverageGuardOptions coverage_guard = DefaultNodeCoverageGuardOptions());
+
+    const NodeCoverageGuardSummary& nodeCoverageGuardSummary() const noexcept {
+        return coverage_guard_summary;
+    }
 
 	// Destructor cleans up allocated resources
 	~AnchorFinder();
 
 	// Launches the anchor searching process
-	RareMatchPairs lanuchAnchorSearching(std::function<void(const RareMatchPairs&)> initial_observer = {});
+	RareMatchPairs lanuchAnchorSearching(std::function<void(const RareMatchPairs&)> initial_observer = {},
+                                         const RecursionTraceSink& trace_observer = {});
 	RareMatchPairs findInitialAnchors(const RareCandidateSink& observer = {});
 
     // One region, no chaining and no recursion. Positions remain in the full
@@ -173,6 +236,11 @@ public:
 
 	// Converts RareMatchPairs to Intervals considering specified intervals
 	static Intervals RareMatchPairs2Intervals(const RareMatchPairs& rare_match_pairs, Interval interval, uint_t fst_length);
+
+    // Checked half-open partition for the opt-in directional recursion route.
+    // Pair second_pos uses concatenated coordinates; Interval.pos2 is query-local.
+    static Intervals SplitHalfOpenGaps(const RareMatchPairs& pairs, Interval interval,
+                                      uint_t fst_length);
 
 	// Converts a global index to a local index relative to concatenated sequences
 	static uint_t indexFromGlogalToLocal(uint_t index, uint_t fst_length);
