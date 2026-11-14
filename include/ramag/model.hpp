@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "ramag/repair_budget.hpp"
 
 namespace ramag {
 
@@ -99,7 +100,48 @@ struct BoundedExtensionStatistics {
     std::uint64_t endpoint_calls{}, auxiliary_capacity_bytes{}, peak_rss_bytes{};
     double seconds{};
 };
+// Linking runs after selection. These counts must not be folded into selection losses.
+struct VacantChainStatistics {
+    std::uint64_t partial_chains{},ambiguous_columns{};
+    std::uint64_t input_records{}, output_records{}, windows{}, flank_rejected{};
+    std::uint64_t candidate_checks{}, fragments{}, duplicates{}, eligible_fragments{};
+    std::uint64_t ambiguous_fragments{}, quality_rejected{}, budget_windows{};
+    std::uint64_t no_chain{}, tied_chains{}, failed_joins{}, accepted_chains{}, accepted_fragments{};
+    std::uint64_t added_reference_bases{}, added_query_bases{}, added_paired_columns{};
+    std::uint64_t work_budget{}, work_reserved{}, ksw_calls{}, auxiliary_peak_bytes{};
+    double seconds{};
+    // Stable window IDs and coordinates. Kept once per invocation, not per candidate.
+    std::vector<std::string> decisions;
+};
+struct MainPathLinkStatistics {
+    std::uint64_t input_records{}, output_records{}, adjacent_pairs{};
+    std::uint64_t geometry_rejected{}, flank_rejected{}, n_rejected{}, length_rejected{};
+    std::uint64_t budget_skipped{}, quality_rejected{}, closure_rejected{}, memory_rejected{};
+    std::uint64_t zero_gap_links{}, exact_gap_links{}, single_gap_links{}, dp_gap_links{};
+    std::uint64_t added_reference_bases{}, added_query_bases{}, added_paired_columns{};
+    std::uint64_t work_budget{}, work_reserved{}, ksw_calls{};
+    std::uint64_t compatibility_work_reserved{}, precheck_saved_work{}, precheck_rejected{};
+    double ksw_seconds{}, planning_seconds{}, assembly_seconds{}, seconds{};
+};
+struct LocalRealignmentStatistics {
+    RepairBudgetStatistics repair_budget;
+    bool repair_fallback{};
+    // Ambiguous columns are the unresolved core envelope, not a TP/FP count.
+    std::uint64_t partial_chains{},ambiguous_columns{};
+    std::uint64_t exchange_contexts{},exchange_accepted{};
+    double exchange_seconds{};
+    std::uint64_t input_records{}, output_records{}, queries{}, components{}, contexts{};
+    std::uint64_t candidate_checks{}, fragments{}, candidate_budget{}, search_tasks{}, seeds{};
+    std::uint64_t search_budget{}, timeouts{}, ambiguous{}, unsupported{}, proposals{};
+    std::uint64_t occupied_rejected{}, unattached{}, accepted{}, merged{}, independent{};
+    std::uint64_t internal_gaps{}, added_paired_columns{}, work_budget{}, work_reserved{}, ksw_calls{};
+    std::uint64_t placement_words{}, placement_unique_words{}, placement_rejected{}, placement_scan_bases{};
+    std::uint64_t auxiliary_peak_bytes{};
+    double seconds{};
+    std::vector<std::string> decisions;
+};
 struct PairwiseStatistics {
+
     BoundedExtensionStatistics short_chain_extension, selected_endpoint_extension;
     std::uint64_t global_ksw_calls{};
     std::uint64_t endpoint_ksw_calls{};
@@ -211,6 +253,10 @@ struct PairwiseStatistics {
 struct RunStatistics {
     std::vector<MemoryObservation> memory_observations;
     PairwiseStatistics pairwise;
+    // One summary per alignment run, not per seed work group.
+    MainPathLinkStatistics mainpath_link;
+    VacantChainStatistics vacant_chain;
+    LocalRealignmentStatistics local_realignment;
 
     std::uint64_t reference_contigs{};
     std::uint64_t query_contigs{};

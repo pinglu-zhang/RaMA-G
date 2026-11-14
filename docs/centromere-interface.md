@@ -42,7 +42,7 @@ Add `--print-effective-config` to inspect the mode, scoring and output formats.
 Omitting `--work-dir` places the run logs in `.ramag-work` beside the output prefix.
 A build with the centromere backend disabled reports dependency error **5**.
 
-Global genome options (`--seed-mode`, `--selection-mode`, `--min-match`,
+Global genome options (`--seed-mode`, `--min-match`,
 `--smem-min-occurrences`, `--min-cluster`, `--max-gap`, `--diag-diff`,
 `--diag-factor`, `--break-length`, `--max-dp-cells`, `--save`,
 `--reference-index`) are rejected when explicitly combined with `-c`.

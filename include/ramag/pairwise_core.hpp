@@ -1,6 +1,8 @@
 #pragma once
 #include "ramag/alignment.hpp"
 #include <span>
+#include <memory>
+#include "ramag/repair_budget.hpp"
 
 namespace ramag {
 enum class GapFillMode { Off, ExactGap, Ksw2Gap, BudgetedKsw2GapV1 };
@@ -49,6 +51,15 @@ struct PairwiseCoreOptions {
     std::uint64_t bounded_work_budget{5000000000ULL};
     std::uint32_t bounded_workers{4};
     Length bounded_endpoint_min_exact{20};
+    bool vacant_chains{false};
+    // Preserve compatibility scheduling while skipping provably rejected DP.
+    bool compatibility_link_precheck{false};
+    bool chain_recover{false};
+    double repair_prior_seconds{};
+    bool recomputed_link_policy{false};
+    LinkGapMode vacant_link_mode{LinkGapMode::Bounded};
+    // Invocation-local cumulative ledger for conservative chain recovery.
+    std::shared_ptr<RepairBudget> repair_budget{};
 };
 struct PairwiseAlignment {
     AlignmentRecord record;
@@ -72,6 +83,11 @@ struct PairwiseCoreResult {
     double selection_seconds{};
     std::vector<MemoryObservation> memory_observations;
     PairwiseStatistics statistics;
+    bool prelinked{};
+    std::uint64_t protected_selected_count{};
+    MainPathLinkStatistics link_statistics;
+    VacantChainStatistics vacant_statistics;
+    LocalRealignmentStatistics local_statistics;
 };
 // Resolve this binary's experimental build policy and explicit alignment options.
 // CLI and library clients can use the same conversion; no process-global state.
@@ -85,6 +101,34 @@ struct PairwiseCoreResult {
     std::span<const SequenceRecord> references,
     std::span<const SequenceRecord> queries,
     std::span<const Seed> seeds,
+    const PairwiseCoreOptions& options = {});
+
+// Link an already selected, disjoint main path. Does not reselect or delete pairs.
+// On invalid input or cancellation, records are not modified. The work cap in
+// options may only tighten the frozen 500M limit and is also capped by input size.
+[[nodiscard]] MainPathLinkStatistics LinkSelectedAlignmentRecords(
+    std::span<const SequenceRecord> references,
+    std::span<const SequenceRecord> queries,
+    std::vector<AlignmentRecord>& records,
+    LinkGapMode mode,
+    const PairwiseCoreOptions& options = {});
+
+// Restore only complete two-flank chains into an already linked, fixed main
+// path. Candidates are evidence, not output. Cancellation is transactional.
+[[nodiscard]] VacantChainStatistics RestoreVacantAlignmentChains(
+    std::span<const SequenceRecord> references, std::span<const SequenceRecord> queries,
+    std::span<const AlignmentRecord> candidates, std::vector<AlignmentRecord>& records,
+    LinkGapMode mode, std::uint64_t remaining_work_budget,
+    const PairwiseCoreOptions& options = {});
+// Chain-supported recovery only; protects all existing pairs and consumed spans.
+// Resource exhaustion returns unchanged records with repair_fallback=true.
+// Caller cancellation and malformed inputs propagate without publication.
+[[nodiscard]] LocalRealignmentStatistics RestoreChainAlignmentPaths(
+    std::span<const SequenceRecord> references,
+    std::span<const SequenceRecord> queries,
+    std::span<const AlignmentRecord> candidates,
+    std::vector<AlignmentRecord>& records,
+    std::uint64_t work_budget,
     const PairwiseCoreOptions& options = {});
 
 // CLI/Sufkit bridge: retains all or the pairwise reference/query DP intersection.

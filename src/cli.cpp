@@ -72,12 +72,6 @@ SeedMode ParseSeedMode(std::string_view text) {
   throw CliError("unknown --seed-mode value: " + std::string(text));
 }
 
-AlignmentSelection ParseAlignmentSelection(std::string_view text) {
-  if (text == "all") return AlignmentSelection::All;
-  if (text == "one-to-one") return AlignmentSelection::ReciprocalOneToOne;
-  throw CliError("unknown --selection-mode value: " + std::string(text));
-}
-
 ProgressMode ParseProgressMode(std::string_view text) {
   if (text == "auto") return ProgressMode::Auto;
   if (text == "on") return ProgressMode::On;
@@ -400,6 +394,7 @@ std::string AlignmentSelectionName(AlignmentSelection selection) {
   switch (selection) {
     case AlignmentSelection::All: return "all";
     case AlignmentSelection::ReciprocalOneToOne: return "one-to-one";
+    case AlignmentSelection::LinkedOneToOne: return "linked-one-to-one";
   }
   throw CliError("invalid internal alignment selection mode");
 }
@@ -467,7 +462,7 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
   for (int index = 2; index < argc; ++index) {
     const std::string_view option = argv[index];
     if (option == "--reference-index" || option == "--save" || option == "--seed-mode" ||
-        option == "--selection-mode" || option == "--min-match" || option == "--smem-min-occurrences" ||
+        option == "--min-match" || option == "--smem-min-occurrences" ||
         option == "--max-gap" || option == "--diag-diff" || option == "--diag-factor" ||
         option == "--min-cluster" || option == "--break-length" || option == "--max-dp-cells") {
       if (centromere_incompatible.empty()) centromere_incompatible = option;
@@ -537,8 +532,6 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
       parsed.run_spec.progress.interval_explicit = true;
     } else if (option == "--seed-mode") {
       parsed.run_spec.alignment.seed_mode = ParseSeedMode(RequireValue(argc, argv, index, option));
-    } else if (option == "--selection-mode") {
-      parsed.run_spec.alignment.selection = ParseAlignmentSelection(RequireValue(argc, argv, index, option));
     } else if (option == "--min-match") {
       parsed.run_spec.alignment.min_match = ParseInteger<Length>(RequireValue(argc, argv, index, option), option);
     } else if (option == "--smem-min-occurrences") {
@@ -595,6 +588,13 @@ CliParseResult ParseCommandLine(int argc, const char* const* argv) {
     spec.common = parsed.run_spec;
     ValidateBatchSpec(spec);
     return parsed;
+  }
+  // Fix the ordinary align workflow at the CLI boundary. Library, resident
+  // batch and centromere callers keep their independent selection contracts.
+  if (!parsed.run_spec.centromere.whole_input) {
+    parsed.run_spec.alignment.selection = AlignmentSelection::LinkedOneToOne;
+    parsed.run_spec.alignment.link_gap_mode = LinkGapMode::Bounded;
+    parsed.run_spec.alignment.link_recovery_mode = LinkRecoveryMode::None;
   }
   if (parsed.run_spec.centromere.whole_input && CentromereCliFullAlignment() &&
       !have_formats && parsed.run_spec.outputs.empty())
@@ -835,12 +835,16 @@ Centromere input (align only; source-derived RaMA + WFA2 on Linux):
   Genome tuning/index options are incompatible with -c.
   BED mixed alignment remains unsupported; it does not fall back to genome mode.
 
+Ordinary align workflow:
+  Bilateral one-to-one selection, main-path linking and bounded gap filling
+  run automatically. Additional vacant/chain recovery is disabled.
+  Batch keeps its existing candidate-output workflow; -c uses its own workflow.
+
 Core options:
   --threads N               Worker budget (default: 1)
   --progress auto|on|off    Terminal progress (default: auto)
   --progress-interval N     Progress seconds, N >= 1 (default: 10)
   --seed-mode MODE          fast|mumreference|mum|smem|maxmatch (default: fast)
-  --selection-mode MODE     all|one-to-one (default: all)
   --min-match N             Minimum exact seed length (default: 20)
   --smem-min-occurrences N  Minimum SMEM reference occurrences (default: 1)
   --print-effective-config  Validate, print effective configuration, and exit
@@ -1072,6 +1076,9 @@ std::string EffectiveConfigText(const RunSpec& spec) {
          << "progress_interval=" << spec.progress.interval_seconds << '\n'
          << "seed_mode=" << SeedModeName(spec.alignment.seed_mode) << '\n'
          << "selection_mode=" << AlignmentSelectionName(spec.alignment.selection) << '\n'
+         << "link_gap_mode=" << (spec.alignment.selection != AlignmentSelection::LinkedOneToOne ? "off" :
+             spec.alignment.link_gap_mode == LinkGapMode::None ? "none" : "bounded") << '\n'
+         << "link_recovery_mode=" << (spec.alignment.link_recovery_mode == LinkRecoveryMode::None ? "none" : spec.alignment.link_recovery_mode == LinkRecoveryMode::VacantChains ? "vacant-chains" : spec.alignment.link_recovery_mode == LinkRecoveryMode::ChainRecover ? "chain-recover" : "invalid") << '\n'
          << "min_match=" << spec.alignment.min_match << '\n'
          << "smem_min_occurrences=" << spec.alignment.smem_min_occurrences << '\n'
          << "max_gap=" << spec.alignment.max_gap << '\n'

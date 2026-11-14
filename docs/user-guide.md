@@ -179,9 +179,10 @@ unique explicit names in a seqfile. Missing/unreadable query files are individua
 failures; malformed seqfiles and duplicate names fail before index initialization.
 
 Each item writes `OUTPUT_DIR/NAME/alignment.paf` by default. `--formats` accepts
-the same five formats as `align`; seed, selection, scoring and thread defaults
-also match `align` (including `fast` and `all`). To select a different policy,
-pass `--seed-mode mumreference --selection-mode one-to-one` explicitly. Batch
+the same five formats as `align`. Seed, scoring and thread defaults also match
+`align` (including `fast`). Batch retains its existing `all` candidate-output
+policy; ordinary `align` automatically selects and links a bilateral main path.
+The three former selection/linking/recovery CLI switches are no longer accepted. Batch
 does not accept `--output` or `--output-prefix`. The output directory is required;
 the optional `--work-dir` defaults to `OUTPUT_DIR/.ramag-work`.
 
@@ -263,12 +264,23 @@ query record exposes at most two search tasks, even with `--threads 32`.
 Concurrent tasks require their own search buffers and reverse-complement
 storage; peak search memory can increase relative to serial enumeration.
 
-`--selection-mode all` is the default and exposes valid pairwise candidates.
-`one-to-one` uses the current pairwise reference-side and query-side DP selection
-and retains their intersection. It does not use the former reciprocal elementary
-interval selector and does not claim equivalence to MUMmer4 `delta-filter -1`.
-The internal residual recovery and guarded gap-fill build settings remain as
-before this input/logging migration; neither is silently enabled by this change.
+Ordinary `ramag align` always intersects the reference-side and query-side DP
+selections, links compatible neighboring records, and fills supported bounded
+gaps. It uses `linked-one-to-one`, `bounded`, and no additional vacant/chain
+recovery. These are algorithm stages, not CLI switches. `--selection-mode`,
+`--link-gap-mode`, and `--link-recovery-mode` have been removed and produce an
+unknown-option error; remove them from existing commands.
+
+This changes the old default from all candidates to a linked bilateral main
+path. Alternative repeat placements may therefore disappear; this is not an
+output-equivalent change relative to the old `all` default. It is equivalent
+to explicitly selecting linked/bounded/no-recovery in the preceding version.
+The selection is not equivalent to MUMmer4 `delta-filter -1`.
+
+The `batch` candidate-output workflow, `align -c` centromere workflow and
+library defaults retain their existing semantics. Library callers can still
+select candidate, unlinked, linked and recovery modes through `AlignmentOptions`.
+See [main-path linking](mainpath-linking.md) for coordinates and gap limits.
 
 ## Alignment options
 
@@ -352,11 +364,11 @@ Define `REF`, `QUERY`, `INDEX`, `PREFIX`, and `WORK` for your own data and paths
 ramag index --reference "$REF" --output "$INDEX" --work-dir "$WORK/index" --threads 32
 ramag align --reference "$REF" --query "$QUERY" --reference-index "$INDEX" \
   --output "$PREFIX.paf" --output "$PREFIX.maf" --work-dir "$WORK/align" \
-  --threads 32 --seed-mode mumreference --selection-mode one-to-one \
+  --threads 32 --seed-mode mumreference \
   --print-effective-config
 ramag align --reference "$REF" --query "$QUERY" --reference-index "$INDEX" \
   --output "$PREFIX.paf" --output "$PREFIX.maf" --work-dir "$WORK/align" \
-  --threads 32 --seed-mode mumreference --selection-mode one-to-one --progress on
+  --threads 32 --seed-mode mumreference --progress on
 ```
 
 For multiple queries, repeat alignment with the same reference/index and separate

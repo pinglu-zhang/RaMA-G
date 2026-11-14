@@ -2,6 +2,15 @@
 
 ## Unreleased changes
 
+- Make ordinary `ramag align` select a bilateral one-to-one main path and link
+  compatible records with bounded gap filling. Additional recovery is disabled.
+- Remove the `--selection-mode`, `--link-gap-mode` and `--link-recovery-mode`
+  switches. Existing command lines must omit them. The ordinary default now
+  matches the preceding explicit linked/bounded/no-recovery workflow instead
+  of full candidate output. Batch, centromere and library defaults are unchanged.
+- Add main-path linking, bounded vacant/chain recovery library interfaces and
+  shared cumulative recovery budgets; install their public budget header.
+
 - Add the source-derived RaMA centromere backend, anchor-only CLI export,
   installed centromere library, and opt-in direction-region planning and repair.
   Experimental direction options remain disabled by default.

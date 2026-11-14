@@ -24,14 +24,14 @@ using the existing `-DRAMAG_SUFKIT_SOURCE_DIR=PATH` option.
 ## Run
 
 The parameter values are CLI options, not CMake cache variables. Both must be
-passed explicitly, along with the seed and selection modes:
+passed explicitly, along with the seed mode:
 
 ```bash
 ./build/coverage-40-500/ramag align \
   --reference reference.fa --query query.fa \
   --reference-index reference.sufidx \
   --output result.paf --work-dir work \
-  --threads 16 --seed-mode mumreference --selection-mode one-to-one \
+  --threads 16 --seed-mode mumreference \
   --min-match 20 --min-cluster 40 --max-gap 500 \
   --diag-diff 5 --diag-factor 0.12 --progress off
 ```
@@ -45,6 +45,11 @@ flags enabled. The same build is usable with serial `batch`; use the same explic
 alignment parameters with batch's own query and output-directory arguments.
 
 ## Validation status
+
+The historical measurements below used unlinked one-to-one selection. Current
+ordinary CLI alignment always adds bounded main-path linking, so the command
+above is not an exact reproduction of those historical output records. Use the
+preserved historical source/binary to reproduce the original comparison.
 
 The complete Human–Chimp parameter screen measured this configuration using
 16 threads, a fixed 16-CPU mask, full inputs, a byte-coded reference index, and PAF-only

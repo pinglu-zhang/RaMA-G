@@ -6,7 +6,8 @@ query multi-FASTA using a complete Sufkit suffix array and a KSW2 pairwise core.
 
 - Plain and gzip/BGZF-compatible sequential FASTA input through kseq and zlib.
 - Five seed modes: `fast`, `mumreference`, `mum`, `smem`, `maxmatch`.
-- `all` or pairwise bilateral `one-to-one` selection.
+- Whole-genome `align` automatically selects a bilateral one-to-one main path
+  and links adjacent records with bounded gap filling; extra recovery is disabled.
 - SAM, PAF, delta, pairwise MAF and UCSC chain from the same final records.
 - Optional persistent compressed-LCP reference index, progress and signal handling.
 - Batch queries from repeated `--query` options or a named seqfile, sharing one

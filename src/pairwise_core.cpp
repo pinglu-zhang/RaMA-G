@@ -1,6 +1,7 @@
 // Pairwise alignment kernel. Source attribution and MIT notice are retained
 // in THIRD_PARTY_NOTICES.md. Do not substitute unrelated gap backends.
 #include "ramag/pairwise_core.hpp"
+#include "ramag/detail/gap_ambiguity.hpp"
 #include "ksw2.h"
 #include <algorithm>
 #include <array>
@@ -2454,8 +2455,15 @@ Sequences CheckSequences(std::span<const SequenceRecord> records) {
 char Complement(char base) {return pairwise_detail::BASE_COMPLEMENT[static_cast<unsigned char>(base)];}
 struct NoAnchorVisit { void operator()(unsigned,Length,Length,char,char) const {} };
 template<class Visitor=NoAnchorVisit>
-AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& refs,const Sequences& queries,bool materialize=true,Visitor visit={}) {
+AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& refs,const Sequences& queries,bool materialize=true,Visitor visit={},const PairwiseCoreOptions* repair_options=nullptr) {
     AlignmentRecord r;
+    auto* repair=repair_options?repair_options->repair_budget.get():nullptr;
+    auto lease=repair?repair->Memory(0):RepairMemoryLease{};
+    const auto replay=[&](Length n) {
+        if(!repair_options)return;
+        KernelCheck(*repair_options,"repair-cigar-conversion");
+        if(repair)repair->Consume(RepairWork::ReplayColumns,n);
+    };
     r.reference_id=a.reference_id; r.query_id=a.query_id;
     r.reference_begin=a.reference_begin; r.reference_end=a.reference_begin+a.ref_len;
     r.query_begin=a.query_begin; r.query_end=a.query_begin+a.qry_len;
@@ -2463,8 +2471,22 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
     const auto& ref=refs.at(r.reference_id)->bases; const auto& qry=queries.at(r.query_id)->bases;
     if(r.reference_end>ref.size() || r.query_end>qry.size() || a.ref_len==0 || a.qry_len==0) throw AlignmentError("pairwise alignment span outside sequence");
     Length rp=r.reference_begin, qp=0;
-    const auto append=[&](char op,Length n){if(n==0) throw AlignmentError("pairwise zero CIGAR operation");if(!materialize)return;if(!r.cigar.empty()&&r.cigar.back().operation==op)r.cigar.back().length+=n;else r.cigar.push_back({op,n});};
+    const auto append=[&](char op,Length n){
+        if(n==0)throw AlignmentError("pairwise zero CIGAR operation");
+        if(!materialize)return;
+        if(!r.cigar.empty()&&r.cigar.back().operation==op)r.cigar.back().length+=n;
+        else {
+            if(repair&&r.cigar.size()==r.cigar.capacity()) {
+                const auto next=std::max<size_t>(1,r.cigar.capacity()*2);
+                if(next>SIZE_MAX/sizeof(CigarOp)-r.cigar.capacity())throw AlignmentError("repair CIGAR capacity overflow");
+                lease.Grow((next+r.cigar.capacity())*sizeof(CigarOp));
+                r.cigar.reserve(next);lease.Grow(r.cigar.capacity()*sizeof(CigarOp));
+            }
+            r.cigar.push_back({op,n});
+        }
+    };
     for(auto unit:a.cigar) {
+        if(repair)repair->Consume(RepairWork::CandidateCigar,1);
         const Length n=unit>>4; const auto op=unit&15;
         if(n==0 || (op!=0&&op!=1&&op!=2&&op!=7&&op!=8)) throw AlignmentError("pairwise invalid packed CIGAR");
         if(op!=1 && n>r.reference_end-rp) throw AlignmentError("pairwise reference CIGAR overrun");
@@ -2472,6 +2494,7 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
         if(op==1 || op==2) {
             if constexpr(!std::is_same_v<Visitor,NoAnchorVisit>) {
                 for(Length j=0;j<n;++j) {
+                    if((j&65535)==0)replay(std::min<Length>(65536,n-j));
                     const auto rpos=rp+(op==2?j:0),qpos=qp+(op==1?j:0);
                     const char x=op==1?'A':ref[rpos];
                     const char y=op==2?'A':(r.strand==Strand::Forward?qry[r.query_begin+qpos]:Complement(qry[r.query_end-qpos-1]));
@@ -2483,6 +2506,7 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
             if(op==1)qp+=n;else rp+=n;
         } else {
             for(Length j=0;j<n;++j) {
+                if((j&65535)==0)replay(std::min<Length>(65536,n-j));
                 const char x=ref[rp++];
                 const char y=r.strand==Strand::Forward?qry[r.query_begin+qp]:Complement(qry[r.query_end-qp-1]); ++qp;
                 const bool same=x==y&&x!='N';
@@ -2503,6 +2527,10 @@ AlignmentRecord ConvertAnchor(const pairwise_detail::Anchor& a,const Sequences& 
 #include "pairwise_one_sided.inc"
 #include "pairwise_fragment_selection.inc"
 #include "pairwise_bounded_extension.inc"
+#include "pairwise_mainpath_link.inc"
+#include "pairwise_vacant_chain.inc"
+#include "pairwise_repair_tools.inc"
+#include "pairwise_chain_recovery.inc"
 } // namespace
 
 static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::vector<Seed> seeds,const PairwiseCoreOptions& o,bool selected_only,std::uint64_t& candidate_count,pairwise_detail::DiagnosticSink* diagnostic=nullptr) {
@@ -2776,6 +2804,71 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
             result.statistics.selected_endpoint_extension.auxiliary_capacity_bytes);
         if(diagnostic)diagnostic->anchors("bounded-selected",anchors);
     }
+    if(o.vacant_chains) {
+        if(!selected_only)throw AlignmentError("vacant recovery requires selected main path");
+        std::vector<AlignmentRecord> fixed;
+        for(auto& a:anchors)if(a.ref_selected&&a.qry_selected)fixed.push_back(ConvertAnchor(a,refs,qrys));
+        std::stable_sort(fixed.begin(),fixed.end(),[](const auto& a,const auto& b) {
+            return std::tie(a.query_id,a.query_begin,a.reference_id,a.reference_begin,a.strand,a.query_end,a.reference_end)<
+                   std::tie(b.query_id,b.query_begin,b.reference_id,b.reference_begin,b.strand,b.query_end,b.reference_end);
+        });
+        std::set<SequenceId> primaries;
+        for(auto& a:fixed)a.primary=primaries.insert(a.query_id).second;
+        result.protected_selected_count=fixed.size();
+        result.link_statistics=LinkMainPath(references,queries,fixed,o.vacant_link_mode,o);
+        const auto remaining=result.link_statistics.work_budget-result.link_statistics.compatibility_work_reserved;
+        result.vacant_statistics=RecoverVacantChains(references,queries,anchors,fixed,o.vacant_link_mode,o,remaining);
+        if(o.chain_recover) {
+            const auto available=result.link_statistics.work_budget-result.link_statistics.work_reserved-result.vacant_statistics.work_reserved;
+            auto limits=RepairBudgetLimits{};
+            limits.work[static_cast<size_t>(RepairWork::DpWork)]=available;
+            auto guarded=o;
+            guarded.repair_budget=o.repair_budget?o.repair_budget:
+                std::make_shared<RepairBudget>(std::max(std::numeric_limits<double>::min(),std::min(300.0,.25*(Elapsed(memory_begin)+o.repair_prior_seconds))),limits);
+            // User cancellation takes priority over internal budget exhaustion.
+            // Existing helpers already checkpoint through this callback.
+            guarded.interruption_callback=[user=o.interruption_callback,budget=guarded.repair_budget](std::string_view phase) {
+                if(user)user(phase);
+                budget->Check(phase);
+            };
+            const auto repair_start=KernelClock::now();
+            const auto old_count=fixed.size();
+            bool allocation_failed=false;
+            KernelProgress(o,"repair-stage-begin",0,old_count);
+            try {
+                std::uint64_t bytes=fixed.capacity()*sizeof(AlignmentRecord);
+                for(const auto& record:fixed)bytes+=record.cigar.capacity()*sizeof(CigarOp);
+                auto lease=guarded.repair_budget->Memory(bytes);
+                auto repaired=fixed;
+                RepairMemoryLease recovered_output_memory;
+                // Candidate recovery consumes immutable B0 and publishes only
+                // after the existing budget/cancellation checks complete.
+                result.local_statistics=ChainRecoverPaths(
+                    references,queries,anchors,repaired,guarded,available,&recovered_output_memory);
+                KernelCheck(o,"repair-publication");
+                guarded.repair_budget->Check("repair-publication");
+                fixed.swap(repaired);
+            } catch(const RepairBudgetExceeded&) {
+                result.local_statistics={};result.local_statistics.repair_fallback=true;
+            } catch(const std::bad_alloc&) {
+                result.local_statistics={};result.local_statistics.repair_fallback=true;allocation_failed=true;
+            }
+            auto& repair=result.local_statistics;
+            repair.input_records=old_count;repair.output_records=fixed.size();
+            repair.seconds=Elapsed(repair_start);
+            repair.repair_budget=guarded.repair_budget->Snapshot();
+            if(allocation_failed){repair.repair_budget.exhausted=true;repair.repair_budget.reason=RepairLimitReason::Memory;repair.repair_budget.phase="allocator";}
+            KernelProgress(o,repair.repair_fallback?"repair-stage-budget-fallback":"repair-stage-complete",fixed.size(),old_count);
+        }
+        result.prelinked=true;
+        for(auto& a:fixed) {
+            const auto scan=ScanLinkRecord(a,refs,qrys);
+            result.records.push_back({std::move(a),true,true,scan.matches,scan.columns,false,false,false,0});
+        }
+        result.statistics.output_conversion_seconds=Elapsed(start)-result.link_statistics.seconds-result.vacant_statistics.seconds-result.local_statistics.seconds;
+        KernelProgress(o,"conflict-resolution",result.records.size(),result.records.size());
+        return result;
+    }
     const auto output_count=static_cast<size_t>(std::count_if(anchors.begin(),anchors.end(),[&](const auto& a) {
         return !selected_only||(a.ref_selected&&a.qry_selected);
     }));
@@ -2801,12 +2894,98 @@ static PairwiseCoreResult AlignPairwiseCoreImpl(std::span<const SequenceRecord> 
     return result;
 }
 
+MainPathLinkStatistics LinkSelectedAlignmentRecords(
+        std::span<const SequenceRecord> references, std::span<const SequenceRecord> queries,
+        std::vector<AlignmentRecord>& records, LinkGapMode mode, const PairwiseCoreOptions& options) {
+    return LinkMainPath(references, queries, records, mode, options);
+}
+
+VacantChainStatistics RestoreVacantAlignmentChains(
+        std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,
+        std::span<const AlignmentRecord> candidates,std::vector<AlignmentRecord>& records,
+        LinkGapMode mode,std::uint64_t remaining_work_budget,const PairwiseCoreOptions& options) {
+    if(remaining_work_budget>options.gap_fill_work_budget||remaining_work_budget>500000000)
+        throw AlignmentError("invalid vacant work budget");
+    const auto refs=CheckSequences(references),qrys=CheckSequences(queries);
+    pairwise_detail::AnchorVec anchors;anchors.reserve(candidates.size());
+    for(const auto& r:candidates) {
+        const auto s=ScanLinkRecord(r,refs,qrys);pairwise_detail::Cigar_t cigar;
+        for(const auto& op:r.cigar) {
+            const unsigned code=op.operation=='='?7:op.operation=='X'?8:op.operation=='I'?1:2;
+            if(op.length>(UINT64_MAX>>4))throw AlignmentError("vacant packed CIGAR overflow");
+            cigar.push_back((op.length<<4)|code);
+        }
+        anchors.emplace_back(r.reference_id,r.reference_begin,r.reference_end-r.reference_begin,
+            r.query_id,r.query_begin,r.query_end-r.query_begin,r.strand,s.columns,s.matches,std::move(cigar));
+    }
+    return RecoverVacantChains(references,queries,anchors,records,mode,options,remaining_work_budget);
+}
+
+LocalRealignmentStatistics RestoreChainAlignmentPaths(
+        std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,
+        std::span<const AlignmentRecord> candidates,std::vector<AlignmentRecord>& records,
+        std::uint64_t budget,const PairwiseCoreOptions& options) {
+    if(budget>500000000)throw AlignmentError("invalid chain recovery budget");
+    auto guarded=options;auto limits=RepairBudgetLimits{};
+    limits.work[static_cast<size_t>(RepairWork::DpWork)]=budget;
+    if(!guarded.repair_budget)guarded.repair_budget=std::make_shared<RepairBudget>(300.0,limits);
+    guarded.interruption_callback=[user=options.interruption_callback,shared=guarded.repair_budget](std::string_view phase) {
+        if(user)user(phase);
+        shared->Check(phase);
+    };
+    const auto begin=KernelClock::now();LocalRealignmentStatistics stats;
+    const auto old_count=records.size();
+    bool allocation_failed=false;
+    stats.input_records=stats.output_records=old_count;
+    try {
+        const auto refs=CheckSequences(references),qrys=CheckSequences(queries);
+        std::uint64_t bytes=candidates.size()*sizeof(pairwise_detail::Anchor)+records.capacity()*sizeof(AlignmentRecord);
+        for(const auto& a:candidates)bytes+=a.cigar.size()*sizeof(std::uint64_t);
+        for(const auto& a:records)bytes+=a.cigar.capacity()*sizeof(CigarOp);
+        auto lease=guarded.repair_budget->Memory(bytes);
+        pairwise_detail::AnchorVec anchors;anchors.reserve(candidates.size());
+        for(const auto& a:candidates) {
+            KernelCheck(options,"chain-candidate-conversion");
+            guarded.repair_budget->Check("chain-candidate-conversion");
+            guarded.repair_budget->Consume(RepairWork::CandidateCigar,a.cigar.size());
+            const auto x=ScanLinkRecord(a,refs,qrys,&guarded);pairwise_detail::Cigar_t cigar;
+            for(const auto& op:a.cigar) {
+                if(op.length>(UINT64_MAX>>4))throw AlignmentError("chain packed CIGAR overflow");
+                cigar.push_back((op.length<<4)|(op.operation=='='?7:op.operation=='X'?8:op.operation=='I'?1:2));
+            }
+            anchors.emplace_back(a.reference_id,a.reference_begin,a.reference_end-a.reference_begin,
+                a.query_id,a.query_begin,a.query_end-a.query_begin,a.strand,x.columns,x.matches,std::move(cigar));
+        }
+        auto working=records;
+        // Direct API callers need not have populated score/NM metadata. Validate
+        // their protected CIGARs once; the CLI has already performed this replay.
+        for(auto& a:working) {
+            const auto scan=ScanLinkRecord(a,refs,qrys,&guarded);
+            a.score=scan.score;a.edit_distance=scan.edits;
+        }
+        RepairMemoryLease recovered_output_memory;
+        stats=ChainRecoverPaths(references,queries,anchors,working,guarded,budget,&recovered_output_memory);
+        KernelCheck(options,"chain-publication");guarded.repair_budget->Check("chain-publication");
+        if(stats.accepted)records.swap(working);
+    } catch(const RepairBudgetExceeded&) {stats={};stats.repair_fallback=true;}
+      catch(const std::bad_alloc&) {stats={};stats.repair_fallback=true;allocation_failed=true;}
+    if(stats.repair_fallback)KernelCheck(options,"chain-fallback-publication");
+    stats.input_records=old_count;
+    stats.output_records=records.size();stats.seconds=Elapsed(begin);
+    stats.repair_budget=guarded.repair_budget->Snapshot();
+    if(allocation_failed){stats.repair_budget.exhausted=true;stats.repair_budget.reason=RepairLimitReason::Memory;stats.repair_budget.phase="allocator";}
+    return stats;
+}
+
+
 PairwiseCoreResult AlignPairwiseCore(std::span<const SequenceRecord> references,std::span<const SequenceRecord> queries,std::span<const Seed> seeds,const PairwiseCoreOptions& o) {
     std::uint64_t candidate_count{};
     return AlignPairwiseCoreImpl(references,queries,std::vector<Seed>(seeds.begin(),seeds.end()),o,false,candidate_count);
 }
 
 void ResolveAlignmentRecords(std::vector<AlignmentRecord>& records, AlignmentSelection selection) {
+    if (selection != AlignmentSelection::All && selection != AlignmentSelection::ReciprocalOneToOne)
+        throw AlignmentError("record selection without sequences cannot link records");
     pairwise_detail::AnchorVec anchors;
     anchors.reserve(records.size());
     for (const auto& r : records) {
@@ -2852,6 +3031,22 @@ void ResolveAlignmentRecords(std::vector<AlignmentRecord>& records, AlignmentSel
 }
 
 PairwiseCoreOptions ConfiguredPairwiseCoreOptions(const AlignmentOptions& options) {
+    if(options.link_recovery_mode!=LinkRecoveryMode::None&&
+       options.link_recovery_mode!=LinkRecoveryMode::VacantChains&&
+       options.link_recovery_mode!=LinkRecoveryMode::ChainRecover)
+        throw AlignmentError("invalid link recovery mode");
+    if(options.link_recovery_mode==LinkRecoveryMode::ChainRecover&&options.link_gap_mode!=LinkGapMode::Bounded)
+        throw AlignmentError("chain recovery requires bounded linking");
+    if (options.selection == AlignmentSelection::LinkedOneToOne) {
+        auto selected = options;
+        selected.selection = AlignmentSelection::ReciprocalOneToOne;
+        auto configured=ConfiguredPairwiseCoreOptions(selected);
+        configured.vacant_chains=options.link_recovery_mode!=LinkRecoveryMode::None;
+        configured.chain_recover=options.link_recovery_mode==LinkRecoveryMode::ChainRecover;
+        configured.compatibility_link_precheck=configured.chain_recover;
+        configured.vacant_link_mode=options.link_gap_mode;
+        return configured;
+    }
     PairwiseCoreOptions o{options.max_gap,options.diag_diff,options.diag_factor,options.min_cluster,options.worker_threads,options.interruption_callback,options.progress_callback,options.resident_bytes_callback};
 #if defined(RAMAG_INTERNAL_COVERAGE_RECOVERY) && RAMAG_INTERNAL_COVERAGE_RECOVERY
     o.recover_uncovered_fragments=options.selection==AlignmentSelection::ReciprocalOneToOne;
@@ -2933,7 +3128,17 @@ std::string PairwiseConfigurationText(const AlignmentOptions& options) {
 
 AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,const std::vector<SequenceRecord>& queries,const AlignmentOptions& options,std::vector<Seed> seeds,RunStatistics stats) {
     if(options.break_length!=200 || options.max_dp_cells!=4000000 || options.match_score!=2 || options.mismatch_penalty!=4 || options.gap_open_penalty!=4 || options.gap_extend_penalty!=2)throw AlignmentError("legacy extension/scoring overrides are not applicable to the pairwise core");
+    if (options.selection != AlignmentSelection::All &&
+        options.selection != AlignmentSelection::ReciprocalOneToOne &&
+        options.selection != AlignmentSelection::LinkedOneToOne)
+        throw AlignmentError("invalid alignment selection");
+    if(options.link_recovery_mode!=LinkRecoveryMode::None&&options.link_recovery_mode!=LinkRecoveryMode::VacantChains&&options.link_recovery_mode!=LinkRecoveryMode::ChainRecover)
+        throw AlignmentError("invalid link recovery mode");
+    if(options.link_recovery_mode!=LinkRecoveryMode::None&&options.selection!=AlignmentSelection::LinkedOneToOne)
+        throw AlignmentError("vacant recovery requires linked-one-to-one");
     auto o=ConfiguredPairwiseCoreOptions(options);
+    o.repair_prior_seconds=stats.seed_seconds;
+    const bool selected_only = options.selection != AlignmentSelection::All;
     std::uint64_t candidate_count{};
     const auto seed_count=seeds.size();
     std::unique_ptr<pairwise_detail::DiagnosticSink> diagnostic;
@@ -2941,7 +3146,7 @@ AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,c
     if(const char* path=std::getenv("RAMAG_COVERAGE_DIAGNOSTIC_DIR"))
         diagnostic=std::make_unique<pairwise_detail::DiagnosticSink>(path,std::getenv("RAMAG_COVERAGE_DIAGNOSTIC_CANDIDATES_ONLY")!=nullptr);
 #endif
-    auto result=AlignPairwiseCoreImpl(refs,queries,std::move(seeds),o,options.selection==AlignmentSelection::ReciprocalOneToOne,candidate_count,diagnostic.get());
+    auto result=AlignPairwiseCoreImpl(refs,queries,std::move(seeds),o,selected_only,candidate_count,diagnostic.get());
     AlignmentResult output;
     output.statistics=std::move(stats);auto& s=output.statistics;
     s.pairwise=result.statistics;
@@ -2957,9 +3162,10 @@ AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,c
     s.chaining_requested_threads=options.worker_threads;s.chaining_worker_threads=result.workers;s.extension_worker_threads=result.workers;
     s.chain_and_extension_seconds=result.clustering_seconds+result.extension_seconds;
     s.conflict_resolution_seconds=result.selection_seconds+result.statistics.recovery_seconds+result.statistics.gap_fill_seconds+result.statistics.selected_endpoint_extension.seconds;
+    if(result.prelinked)s.conflict_resolution_seconds+=result.link_statistics.seconds+result.vacant_statistics.seconds+result.local_statistics.seconds;
     s.total_seconds=s.seed_seconds+s.chain_and_extension_seconds+s.conflict_resolution_seconds;
     std::map<SequenceId,size_t> primary;
-    const auto eligible=[&](const auto& item){return options.selection!=AlignmentSelection::ReciprocalOneToOne||(item.reference_selected&&item.query_selected);};
+    const auto eligible=[&](const auto& item){return !selected_only||(item.reference_selected&&item.query_selected);};
     // Recovery may precede the original primary in coordinate order. Preserve
     // that original designation; only queries with no old winner get a new one.
     for(size_t i=0;i<result.records.size();++i){
@@ -2969,10 +3175,21 @@ AlignmentResult AlignPairwiseFromSeeds(const std::vector<SequenceRecord>& refs,c
     for(size_t i=0;i<result.records.size();++i){
         auto& item=result.records[i];if(!eligible(item))continue;
         primary.try_emplace(item.record.query_id,i);
-        item.record.primary=primary.at(item.record.query_id)==i;
+        if(!result.prelinked)item.record.primary=primary.at(item.record.query_id)==i;
         output.alignments.push_back(std::move(item.record));
     }
-    s.alignment_count=output.alignments.size();s.conflict_rejected_alignment_count=s.candidate_alignment_count-s.alignment_count;
+    // Selection rejection is measured before linking and never includes joins.
+    s.conflict_rejected_alignment_count=s.candidate_alignment_count-(result.prelinked?result.protected_selected_count:output.alignments.size());
+    if(result.prelinked) {
+        s.mainpath_link=std::move(result.link_statistics);
+        s.vacant_chain=std::move(result.vacant_statistics);
+        s.local_realignment=std::move(result.local_statistics);
+        s.total_seconds+=s.mainpath_link.seconds+s.vacant_chain.seconds;
+    } else if (options.selection == AlignmentSelection::LinkedOneToOne) {
+        s.mainpath_link = LinkSelectedAlignmentRecords(refs, queries, output.alignments, options.link_gap_mode, o);
+        s.total_seconds += s.mainpath_link.seconds;
+    }
+    s.alignment_count=output.alignments.size();
     return output;
 }
 } // namespace ramag

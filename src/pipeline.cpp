@@ -1546,7 +1546,8 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
         SecondsBetween(alignment_begin, Clock::now());
     timings["seed_chain_extend"] = std::max(
         0.0, seed_chain_extend_seconds -
-                 result.statistics.conflict_resolution_seconds);
+                 result.statistics.conflict_resolution_seconds -
+                 result.statistics.mainpath_link.seconds);
 
     // Alignment-core conflict resolution is the sole authority for
     // de-duplication, primary assignment, and deterministic record order.
@@ -1554,6 +1555,7 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
     timings["conflict_resolution"] =
         result.statistics.conflict_resolution_seconds;
 
+    timings["mainpath_link"] = result.statistics.mainpath_link.seconds;
     const auto temporary_sam = TemporarySibling(paths.sam, run_id);
     const auto temporary_paf = TemporarySibling(paths.paf, run_id);
     const auto temporary_delta = TemporarySibling(paths.delta, run_id);
@@ -1767,6 +1769,115 @@ static RunOutcome RunAlignmentPipelineImpl(const RunSpec& spec,
       logger->Info("statistics.conflict_resolution_seconds=" + std::to_string(result.statistics.conflict_resolution_seconds), false);
       logger->Info("statistics.total_seconds=" + std::to_string(result.statistics.total_seconds), false);
       logger->Info("statistics.actual_seed_route=" + result.statistics.actual_seed_route, false);
+      logger->Info("vacant_chain.input_records=" + std::to_string(result.statistics.vacant_chain.input_records), false);
+      logger->Info("vacant_chain.output_records=" + std::to_string(result.statistics.vacant_chain.output_records), false);
+      logger->Info("vacant_chain.windows=" + std::to_string(result.statistics.vacant_chain.windows), false);
+      logger->Info("vacant_chain.flank_rejected=" + std::to_string(result.statistics.vacant_chain.flank_rejected), false);
+      logger->Info("vacant_chain.candidate_checks=" + std::to_string(result.statistics.vacant_chain.candidate_checks), false);
+      logger->Info("vacant_chain.fragments=" + std::to_string(result.statistics.vacant_chain.fragments), false);
+      logger->Info("vacant_chain.duplicates=" + std::to_string(result.statistics.vacant_chain.duplicates), false);
+      logger->Info("vacant_chain.eligible_fragments=" + std::to_string(result.statistics.vacant_chain.eligible_fragments), false);
+      logger->Info("vacant_chain.ambiguous_fragments=" + std::to_string(result.statistics.vacant_chain.ambiguous_fragments), false);
+      logger->Info("vacant_chain.quality_rejected=" + std::to_string(result.statistics.vacant_chain.quality_rejected), false);
+      logger->Info("vacant_chain.budget_windows=" + std::to_string(result.statistics.vacant_chain.budget_windows), false);
+      logger->Info("vacant_chain.no_chain=" + std::to_string(result.statistics.vacant_chain.no_chain), false);
+      logger->Info("vacant_chain.tied_chains=" + std::to_string(result.statistics.vacant_chain.tied_chains), false);
+      logger->Info("vacant_chain.failed_joins=" + std::to_string(result.statistics.vacant_chain.failed_joins), false);
+      logger->Info("vacant_chain.accepted_chains=" + std::to_string(result.statistics.vacant_chain.accepted_chains), false);
+      logger->Info("vacant_chain.accepted_fragments=" + std::to_string(result.statistics.vacant_chain.accepted_fragments), false);
+      logger->Info("vacant_chain.added_reference_bases=" + std::to_string(result.statistics.vacant_chain.added_reference_bases), false);
+      logger->Info("vacant_chain.added_query_bases=" + std::to_string(result.statistics.vacant_chain.added_query_bases), false);
+      logger->Info("vacant_chain.added_paired_columns=" + std::to_string(result.statistics.vacant_chain.added_paired_columns), false);
+      logger->Info("vacant_chain.work_budget=" + std::to_string(result.statistics.vacant_chain.work_budget), false);
+      logger->Info("vacant_chain.work_reserved=" + std::to_string(result.statistics.vacant_chain.work_reserved), false);
+      logger->Info("vacant_chain.ksw_calls=" + std::to_string(result.statistics.vacant_chain.ksw_calls), false);
+      logger->Info("vacant_chain.auxiliary_peak_bytes=" + std::to_string(result.statistics.vacant_chain.auxiliary_peak_bytes), false);
+      logger->Info("vacant_chain.seconds=" + std::to_string(result.statistics.vacant_chain.seconds), false);
+      for(const auto& decision:result.statistics.vacant_chain.decisions)logger->Info("vacant_chain.decision="+decision,false);
+      logger->Info("local_realign.input_records=" + std::to_string(result.statistics.local_realignment.input_records), false);
+      logger->Info("local_realign.output_records=" + std::to_string(result.statistics.local_realignment.output_records), false);
+      logger->Info("local_realign.queries=" + std::to_string(result.statistics.local_realignment.queries), false);
+      logger->Info("local_realign.components=" + std::to_string(result.statistics.local_realignment.components), false);
+      logger->Info("local_realign.contexts=" + std::to_string(result.statistics.local_realignment.contexts), false);
+      logger->Info("local_realign.candidate_checks=" + std::to_string(result.statistics.local_realignment.candidate_checks), false);
+      logger->Info("local_realign.fragments=" + std::to_string(result.statistics.local_realignment.fragments), false);
+      logger->Info("local_realign.candidate_budget=" + std::to_string(result.statistics.local_realignment.candidate_budget), false);
+      logger->Info("local_realign.search_tasks=" + std::to_string(result.statistics.local_realignment.search_tasks), false);
+      logger->Info("local_realign.seeds=" + std::to_string(result.statistics.local_realignment.seeds), false);
+      logger->Info("local_realign.search_budget=" + std::to_string(result.statistics.local_realignment.search_budget), false);
+      logger->Info("local_realign.timeouts=" + std::to_string(result.statistics.local_realignment.timeouts), false);
+      logger->Info("local_realign.ambiguous=" + std::to_string(result.statistics.local_realignment.ambiguous), false);
+      logger->Info("local_realign.unsupported=" + std::to_string(result.statistics.local_realignment.unsupported), false);
+      logger->Info("local_realign.proposals=" + std::to_string(result.statistics.local_realignment.proposals), false);
+      logger->Info("local_realign.occupied_rejected=" + std::to_string(result.statistics.local_realignment.occupied_rejected), false);
+      logger->Info("local_realign.unattached=" + std::to_string(result.statistics.local_realignment.unattached), false);
+      logger->Info("local_realign.accepted=" + std::to_string(result.statistics.local_realignment.accepted), false);
+      logger->Info("local_realign.merged=" + std::to_string(result.statistics.local_realignment.merged), false);
+      logger->Info("local_realign.independent=" + std::to_string(result.statistics.local_realignment.independent), false);
+      logger->Info("local_realign.internal_gaps=" + std::to_string(result.statistics.local_realignment.internal_gaps), false);
+      logger->Info("local_realign.added_paired_columns=" + std::to_string(result.statistics.local_realignment.added_paired_columns), false);
+      logger->Info("local_realign.work_budget=" + std::to_string(result.statistics.local_realignment.work_budget), false);
+      logger->Info("local_realign.work_reserved=" + std::to_string(result.statistics.local_realignment.work_reserved), false);
+      logger->Info("local_realign.ksw_calls=" + std::to_string(result.statistics.local_realignment.ksw_calls), false);
+      logger->Info("local_realign.auxiliary_peak_bytes=" + std::to_string(result.statistics.local_realignment.auxiliary_peak_bytes), false);
+      logger->Info("local_realign.placement_words=" + std::to_string(result.statistics.local_realignment.placement_words), false);
+      logger->Info("local_realign.placement_unique_words=" + std::to_string(result.statistics.local_realignment.placement_unique_words), false);
+      logger->Info("local_realign.placement_rejected=" + std::to_string(result.statistics.local_realignment.placement_rejected), false);
+      logger->Info("local_realign.placement_scan_bases=" + std::to_string(result.statistics.local_realignment.placement_scan_bases), false);
+      logger->Info("local_realign.seconds=" + std::to_string(result.statistics.local_realignment.seconds), false);
+      for(const auto& decision:result.statistics.local_realignment.decisions)logger->Info("local_realign.decision="+decision,false);
+      {
+        const auto& repair=result.statistics.local_realignment;
+        const auto& ledger=repair.repair_budget;
+        logger->Info("repair.partial_chains="+std::to_string(repair.partial_chains),false);
+        logger->Info("repair.unresolved_core_columns="+std::to_string(repair.ambiguous_columns),false);
+        logger->Info("repair.exchange_contexts="+std::to_string(repair.exchange_contexts),false);
+        logger->Info("repair.exchange_accepted="+std::to_string(repair.exchange_accepted),false);
+        logger->Info("repair.exchange_seconds="+std::to_string(repair.exchange_seconds),false);
+        logger->Info("repair.fallback_to_baseline="+std::to_string(repair.repair_fallback),false);
+        logger->Info("repair.budget_exhausted="+std::to_string(ledger.exhausted),false);
+        logger->Info("repair.budget_reason="+std::string(RepairLimitName(ledger.reason)),false);
+        logger->Info("repair.budget_phase="+ledger.phase,false);
+        logger->Info("repair.wall_seconds="+std::to_string(ledger.seconds),false);
+        logger->Info("repair.wall_limit_seconds="+std::to_string(ledger.wall_limit_seconds),false);
+        logger->Info("repair.memory_peak_bytes="+std::to_string(ledger.memory_peak_bytes),false);
+        logger->Info("repair.memory_limit_bytes="+std::to_string(ledger.memory_limit_bytes),false);
+        logger->Info("repair.reference_scan_passes="+std::to_string(ledger.reference_scan_passes),false);
+        logger->Info("repair.diagnostics_dropped="+std::to_string(ledger.diagnostics_dropped),false);
+        for(size_t i=0;i<RepairWorkCount;++i) {
+          const auto name=std::string(RepairWorkName(static_cast<RepairWork>(i)));
+          logger->Info("repair.used_"+name+"="+std::to_string(ledger.used[i]),false);
+          logger->Info("repair.limit_"+name+"="+std::to_string(ledger.limits[i]),false);
+        }
+      }
+      logger->Info("mainpath_link.compatibility_work_reserved=" + std::to_string(result.statistics.mainpath_link.compatibility_work_reserved),false);
+      logger->Info("mainpath_link.precheck_saved_work=" + std::to_string(result.statistics.mainpath_link.precheck_saved_work),false);
+      logger->Info("mainpath_link.precheck_rejected=" + std::to_string(result.statistics.mainpath_link.precheck_rejected),false);
+      logger->Info("mainpath_link.input_records=" + std::to_string(result.statistics.mainpath_link.input_records), false);
+      logger->Info("mainpath_link.output_records=" + std::to_string(result.statistics.mainpath_link.output_records), false);
+      logger->Info("mainpath_link.adjacent_pairs=" + std::to_string(result.statistics.mainpath_link.adjacent_pairs), false);
+      logger->Info("mainpath_link.geometry_rejected=" + std::to_string(result.statistics.mainpath_link.geometry_rejected), false);
+      logger->Info("mainpath_link.flank_rejected=" + std::to_string(result.statistics.mainpath_link.flank_rejected), false);
+      logger->Info("mainpath_link.n_rejected=" + std::to_string(result.statistics.mainpath_link.n_rejected), false);
+      logger->Info("mainpath_link.length_rejected=" + std::to_string(result.statistics.mainpath_link.length_rejected), false);
+      logger->Info("mainpath_link.budget_skipped=" + std::to_string(result.statistics.mainpath_link.budget_skipped), false);
+      logger->Info("mainpath_link.quality_rejected=" + std::to_string(result.statistics.mainpath_link.quality_rejected), false);
+      logger->Info("mainpath_link.closure_rejected=" + std::to_string(result.statistics.mainpath_link.closure_rejected), false);
+      logger->Info("mainpath_link.memory_rejected=" + std::to_string(result.statistics.mainpath_link.memory_rejected), false);
+      logger->Info("mainpath_link.zero_gap_links=" + std::to_string(result.statistics.mainpath_link.zero_gap_links), false);
+      logger->Info("mainpath_link.exact_gap_links=" + std::to_string(result.statistics.mainpath_link.exact_gap_links), false);
+      logger->Info("mainpath_link.single_gap_links=" + std::to_string(result.statistics.mainpath_link.single_gap_links), false);
+      logger->Info("mainpath_link.dp_gap_links=" + std::to_string(result.statistics.mainpath_link.dp_gap_links), false);
+      logger->Info("mainpath_link.added_reference_bases=" + std::to_string(result.statistics.mainpath_link.added_reference_bases), false);
+      logger->Info("mainpath_link.added_query_bases=" + std::to_string(result.statistics.mainpath_link.added_query_bases), false);
+      logger->Info("mainpath_link.added_paired_columns=" + std::to_string(result.statistics.mainpath_link.added_paired_columns), false);
+      logger->Info("mainpath_link.work_budget=" + std::to_string(result.statistics.mainpath_link.work_budget), false);
+      logger->Info("mainpath_link.work_reserved=" + std::to_string(result.statistics.mainpath_link.work_reserved), false);
+      logger->Info("mainpath_link.ksw_calls=" + std::to_string(result.statistics.mainpath_link.ksw_calls), false);
+      logger->Info("mainpath_link.ksw_seconds=" + std::to_string(result.statistics.mainpath_link.ksw_seconds), false);
+      logger->Info("mainpath_link.planning_seconds=" + std::to_string(result.statistics.mainpath_link.planning_seconds), false);
+      logger->Info("mainpath_link.assembly_seconds=" + std::to_string(result.statistics.mainpath_link.assembly_seconds), false);
+      logger->Info("mainpath_link.seconds=" + std::to_string(result.statistics.mainpath_link.seconds), false);
       logger->Info("pairwise.global_ksw_calls=" + std::to_string(result.statistics.pairwise.global_ksw_calls), false);
       logger->Info("pairwise.endpoint_ksw_calls=" + std::to_string(result.statistics.pairwise.endpoint_ksw_calls), false);
       logger->Info("pairwise.global_ksw_seconds=" + std::to_string(result.statistics.pairwise.global_ksw_seconds), false);

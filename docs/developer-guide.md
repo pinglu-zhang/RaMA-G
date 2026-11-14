@@ -165,6 +165,11 @@ optimality check, widening or full calculation when necessary. Endpoint extensio
 and per-worker scratch reuse remain unchanged. Scores used for DP, selection and
 serialized records have distinct purposes and are not interchangeable.
 
+Ordinary CLI `align` fixes `LinkedOneToOne`, bounded linking and no recovery at
+the parsing boundary. It does not change `AlignmentOptions` library defaults or
+resident `batch` candidate-output semantics. The former three selection/linking/
+recovery CLI switches are rejected.
+
 Reference-side and query-side DP selection retain their current scores and
 tie-breaking. `one-to-one` intersects the two selected candidate sets; `all`
 exposes valid preselection records. No former legacy reciprocal interval selector

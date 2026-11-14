@@ -73,7 +73,8 @@ install(TARGETS ramag_pairwise EXPORT RaMAGPairwiseTargets ARCHIVE DESTINATION $
 install(EXPORT RaMAGPairwiseTargets NAMESPACE RaMAG:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGPairwise)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RaMAGPairwiseConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/RaMAGPairwiseConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGPairwise)
-install(FILES include/ramag/pairwise_core.hpp include/ramag/alignment.hpp include/ramag/model.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
+install(FILES include/ramag/pairwise_core.hpp include/ramag/alignment.hpp include/ramag/model.hpp
+  include/ramag/repair_budget.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
 install(FILES third_party/ksw2/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/ksw2)
 install(FILES third_party/kseq/kseq.h DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/kseq)
 install(FILES third_party/spdlog/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/spdlog)

@@ -104,7 +104,13 @@ void ScanRecoveryFragments(const pairwise_detail::Anchor& a,size_t parent,
             // Occupied stretches were skipped arithmetically. Inspect only free
             // bases, retaining exact N breaks and match support for each slice.
             for(Length k=0;k<n;++k){
-                if((k&65535)==0&&options.interruption_callback)options.interruption_callback("coverage-recovery");
+                if((k&65535)==0) {
+                    if(options.interruption_callback)options.interruption_callback("coverage-recovery");
+                    // Arithmetic skips above do not inspect sequence. Charge only
+                    // this bounded chunk immediately before its actual base reads.
+                    if(options.repair_budget)options.repair_budget->Consume(
+                        RepairWork::LocalBases,std::min<Length>(65536,n-k));
+                }
                 const char x=op==1?'A':r.at(rp);
                 const char y=op==2?'A':(a.strand==Strand::Forward?q.at(qp):Complement(q.at(qp-1)));
                 const bool paired=op!=1&&op!=2;

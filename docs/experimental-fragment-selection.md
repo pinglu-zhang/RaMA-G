@@ -5,8 +5,9 @@ It does not change seeding, clustering, linking, KSW2 scoring or index handling.
 
 Configure with `-DRAMAG_INTERNAL_POST_SELECTION=fragment-reselect-v1`.
 The default remains `baseline`. It is mutually exclusive with the other post-
-selection policy, legacy recovery, guarded recovery and gap fill. The CLI uses
-it only with `--selection-mode one-to-one`; `all` is unchanged.
+selection policy, legacy recovery, guarded recovery and gap fill. Ordinary CLI
+alignment uses linked main paths; the former selection CLI switch is removed.
+Library `All` callers continue to expose their candidate set.
 Library callers can explicitly set `PostSelectionPolicy::FragmentReselectV1`.
 Recompile callers after changing the public options/statistics headers.
 
