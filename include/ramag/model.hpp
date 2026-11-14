@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include "ramag/repair_budget.hpp"
 
 namespace ramag {
 
@@ -94,25 +93,9 @@ struct MemoryObservation {
     std::uint64_t cigar_capacity_bytes{};
     std::uint64_t auxiliary_capacity_bytes{};
 };
-struct BoundedExtensionStatistics {
-    std::uint64_t candidates{}, scheduled{}, budget_skipped{}, reserved_cells{};
-    std::uint64_t quality_rejected{}, conflict_rejected{}, accepted{}, matches{}, paired_columns{};
-    std::uint64_t endpoint_calls{}, auxiliary_capacity_bytes{}, peak_rss_bytes{};
-    double seconds{};
-};
+
 // Linking runs after selection. These counts must not be folded into selection losses.
-struct VacantChainStatistics {
-    std::uint64_t partial_chains{},ambiguous_columns{};
-    std::uint64_t input_records{}, output_records{}, windows{}, flank_rejected{};
-    std::uint64_t candidate_checks{}, fragments{}, duplicates{}, eligible_fragments{};
-    std::uint64_t ambiguous_fragments{}, quality_rejected{}, budget_windows{};
-    std::uint64_t no_chain{}, tied_chains{}, failed_joins{}, accepted_chains{}, accepted_fragments{};
-    std::uint64_t added_reference_bases{}, added_query_bases{}, added_paired_columns{};
-    std::uint64_t work_budget{}, work_reserved{}, ksw_calls{}, auxiliary_peak_bytes{};
-    double seconds{};
-    // Stable window IDs and coordinates. Kept once per invocation, not per candidate.
-    std::vector<std::string> decisions;
-};
+
 struct MainPathLinkStatistics {
     std::uint64_t input_records{}, output_records{}, adjacent_pairs{};
     std::uint64_t geometry_rejected{}, flank_rejected{}, n_rejected{}, length_rejected{};
@@ -120,29 +103,11 @@ struct MainPathLinkStatistics {
     std::uint64_t zero_gap_links{}, exact_gap_links{}, single_gap_links{}, dp_gap_links{};
     std::uint64_t added_reference_bases{}, added_query_bases{}, added_paired_columns{};
     std::uint64_t work_budget{}, work_reserved{}, ksw_calls{};
-    std::uint64_t compatibility_work_reserved{}, precheck_saved_work{}, precheck_rejected{};
     double ksw_seconds{}, planning_seconds{}, assembly_seconds{}, seconds{};
 };
-struct LocalRealignmentStatistics {
-    RepairBudgetStatistics repair_budget;
-    bool repair_fallback{};
-    // Ambiguous columns are the unresolved core envelope, not a TP/FP count.
-    std::uint64_t partial_chains{},ambiguous_columns{};
-    std::uint64_t exchange_contexts{},exchange_accepted{};
-    double exchange_seconds{};
-    std::uint64_t input_records{}, output_records{}, queries{}, components{}, contexts{};
-    std::uint64_t candidate_checks{}, fragments{}, candidate_budget{}, search_tasks{}, seeds{};
-    std::uint64_t search_budget{}, timeouts{}, ambiguous{}, unsupported{}, proposals{};
-    std::uint64_t occupied_rejected{}, unattached{}, accepted{}, merged{}, independent{};
-    std::uint64_t internal_gaps{}, added_paired_columns{}, work_budget{}, work_reserved{}, ksw_calls{};
-    std::uint64_t placement_words{}, placement_unique_words{}, placement_rejected{}, placement_scan_bases{};
-    std::uint64_t auxiliary_peak_bytes{};
-    double seconds{};
-    std::vector<std::string> decisions;
-};
+
 struct PairwiseStatistics {
 
-    BoundedExtensionStatistics short_chain_extension, selected_endpoint_extension;
     std::uint64_t global_ksw_calls{};
     std::uint64_t endpoint_ksw_calls{};
     double global_ksw_seconds{};
@@ -155,99 +120,9 @@ struct PairwiseStatistics {
     std::uint64_t link_input_candidates{};
     std::uint64_t link_consumed_candidates{};
     std::uint64_t link_emitted_candidates{};
-    std::uint64_t link_unconsumed_retained{};
-    std::uint64_t link_precheck_rejections{};
-    std::uint64_t recovery_guard_rejections{};
     double seed_grouping_seconds{};
     double output_conversion_seconds{};
-    std::uint64_t fragment_parents{};
-    std::uint64_t fragment_proposed{};
-    std::uint64_t fragment_reclips{};
-    std::uint64_t fragment_accepted_whole{};
-    std::uint64_t fragment_accepted_clipped{};
-    std::uint64_t fragment_support_rejected{};
-    std::uint64_t fragment_n_breaks{};
-    std::uint64_t fragment_matches{};
-    std::uint64_t fragment_paired_columns{};
-    std::uint64_t fragment_reference_bases{};
-    std::uint64_t fragment_query_bases{};
-    std::uint64_t fragment_auxiliary_peak_bytes{};
-    std::uint64_t fragment_peak_rss_bytes{};
-    std::uint64_t exchange_trials{};
-    std::uint64_t exchange_accepted{};
-    std::uint64_t exchange_blocker_limit{};
-    std::uint64_t exchange_pool_limit{};
-    std::uint64_t exchange_objective_rejected{};
-    std::uint64_t exchange_paired_gain{};
-    std::uint64_t exchange_passes{};
-    std::uint64_t short_exact_proposed{};
-    std::uint64_t short_exact_accepted{};
-    std::uint64_t short_exact_bases{};
-    std::uint64_t supplement_pruned_count{};
-    std::uint64_t supplement_alternative_count{};
-    std::uint64_t alternative_clusters_checked{};
-    std::uint64_t alternative_support_skipped{};
-    std::uint64_t alternative_dp_calls{};
-    std::uint64_t supplement_deduplicated{};
-    std::uint64_t refinement_auxiliary_peak_bytes{};
-    double fragment_refinement_seconds{};
-    double fragment_seconds{};
-    std::string post_selection_strategy{"baseline"};
-    std::uint64_t post_selection_original_records{};
-    std::uint64_t post_selection_one_sided{};
-    std::uint64_t post_selection_both_rejected{};
-    std::uint64_t post_selection_windows{};
-    std::uint64_t post_selection_window_geometry_rejected{};
-    std::uint64_t post_selection_window_occupied_rejected{};
-    std::uint64_t post_selection_window_quality_rejected{};
-    std::uint64_t post_selection_window_n_rejected{};
-    std::uint64_t post_selection_parents_in_windows{};
-    std::uint64_t post_selection_no_window{};
-    std::uint64_t post_selection_support_rejected{};
-    std::uint64_t post_selection_identity_rejected{};
-    std::uint64_t post_selection_n_breaks{};
-    std::uint64_t post_selection_conflict_reclips{};
-    std::uint64_t post_selection_paired_columns{};
-    std::uint64_t post_selection_matches{};
-    std::uint64_t post_selection_mismatches{};
-    std::uint64_t post_selection_insertions{};
-    std::uint64_t post_selection_deletions{};
-    std::uint64_t post_selection_queue_peak{};
-    std::uint64_t post_selection_auxiliary_peak_bytes{};
-    std::uint64_t post_selection_peak_rss_bytes{};
-    bool recovery_enabled{};
-    std::uint64_t recovery_candidates_checked{};
-    std::uint64_t recovery_proposed_fragments{};
-    std::uint64_t recovery_requeued_fragments{};
-    std::uint64_t recovery_accepted_fragments{};
-    std::uint64_t recovery_reference_bases{};
-    std::uint64_t recovery_query_bases{};
-    double recovery_seconds{};
-    std::string gap_fill_strategy{"off"};
-    std::uint64_t gap_fill_adjacent_pairs{};
-    std::uint64_t gap_fill_geometry_rejected{};
-    std::uint64_t gap_fill_occupied_rejected{};
-    std::uint64_t gap_fill_flank_rejected{};
-    std::uint64_t gap_fill_n_rejected{};
-    std::uint64_t gap_fill_candidates{};
-    std::uint64_t gap_fill_work_budget{};
-    std::uint64_t gap_fill_work_reserved{};
-    std::uint64_t gap_fill_budget_skipped{};
-    std::uint64_t gap_fill_length_skipped{};
-    std::uint64_t gap_fill_skipped_reference_bases{};
-    std::uint64_t gap_fill_skipped_query_bases{};
-    std::uint64_t gap_fill_auxiliary_capacity_bytes{};
-    std::uint64_t gap_fill_exact{};
-    std::uint64_t gap_fill_ksw_calls{};
-    std::uint64_t gap_fill_quality_rejected{};
-    std::uint64_t gap_fill_nonexact_rejected{};
-    std::uint64_t gap_fill_conflict_rejected{};
-    std::uint64_t gap_fill_accepted{};
-    std::uint64_t gap_fill_reference_bases{};
-    std::uint64_t gap_fill_query_bases{};
-    std::uint64_t gap_fill_paired_columns{};
-    double gap_fill_ksw_seconds{};
-    double gap_fill_seconds{};
+
 };
 
 struct RunStatistics {
@@ -255,8 +130,6 @@ struct RunStatistics {
     PairwiseStatistics pairwise;
     // One summary per alignment run, not per seed work group.
     MainPathLinkStatistics mainpath_link;
-    VacantChainStatistics vacant_chain;
-    LocalRealignmentStatistics local_realignment;
 
     std::uint64_t reference_contigs{};
     std::uint64_t query_contigs{};

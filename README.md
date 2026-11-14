@@ -1,83 +1,157 @@
 # RaMA-G
 
-RaMA-G is a C++20 library and command-line application for deterministic pairwise
-whole-genome nucleotide alignment. It aligns one reference multi-FASTA with one
-query multi-FASTA using a complete Sufkit suffix array and a KSW2 pairwise core.
+RaMA-G aligns assembled nucleotide sequences. It provides a command-line program
+and C++20 libraries for pairwise whole-genome and centromere alignment.
 
-- Plain and gzip/BGZF-compatible sequential FASTA input through kseq and zlib.
-- Five seed modes: `fast`, `mumreference`, `mum`, `smem`, `maxmatch`.
-- Whole-genome `align` automatically selects a bilateral one-to-one main path
-  and links adjacent records with bounded gap filling; extra recovery is disabled.
-- SAM, PAF, delta, pairwise MAF and UCSC chain from the same final records.
-- Optional persistent compressed-LCP reference index, progress and signal handling.
-- Batch queries from repeated `--query` options or a named seqfile, sharing one
-  reference/index initialization and processing queries serially.
-- Thread-safe console/file logging using spdlog.
+- **Whole genomes:** search both orientations, select a bilateral one-to-one
+  main path, link compatible records, and fill supported bounded gaps.
+- **Centromeres:** predict directions, find recursive RaMA anchors and accepted
+  copy branches, review paths, and align supported internal gaps.
+- **Outputs:** SAM, PAF, pairwise MAF, delta and UCSC chain for genome alignment;
+  path-aware SAM, PAF and MAF with diagnostic tables for centromeres.
+- **Inputs:** plain or gzip FASTA; an optional persistent reference index can be
+  reused across queries.
 
-See the [user guide](docs/user-guide.md) for commands and input/output contracts,
-and the [developer guide](docs/developer-guide.md) for the algorithms and library.
+## Install
 
-See the [changelog](CHANGELOG.md) for release and compatibility notes.
-
-On Linux, `ramag align -c` aligns one centromere FASTA record per input.
-It predicts query directions, searches recursively for RaMA anchors and copy
-branches, reviews local paths, and aligns supported internal gaps with
-`centrolign-3piece` scoring.
+The production platform is **Linux x86-64 with SSE4.2**. Build requirements are
+C++20 and C11 compilers, CMake 3.22 or newer, Git, zlib development files, C/C++
+OpenMP, and Make or Ninja. On Ubuntu 24.04:
 
 ```bash
-./build/ramag align -c --reference reference.fa --query query.fa \
-  --output-prefix comparison
+sudo apt-get update
+sudo apt-get install build-essential cmake git zlib1g-dev
+
+git clone https://github.com/pinglu-zhang/RaMA-G.git
+cd RaMA-G
+cmake --preset release
+cmake --build --preset release --parallel 4
+./build/release/ramag --version
 ```
 
-The command exports **SAM, PAF and MAF** together with direction, anchor, copy,
-segment and gap TSVs. Use `--formats paf` to select only PAF among the standard
-formats. Unresolved regions are recorded in the TSVs. Mixed alignment with
-`--ref-cen BED --query-cen BED` still requires a separate backend integration.
-See the [centromere interface](docs/centromere-interface.md) and the
-[alignment format contract](docs/centromere-alignment-formats.md).
+The first configuration downloads pinned Sufkit and WFA2 sources. Rust, Cargo,
+Python and an independent Centrolign installation are not needed to build or run
+the program. For a genome-only build, use the `genome-only` preset; it omits the
+centromere backend and WFA2, but still requires Sufkit.
 
-The opt-in [coverage-40-500 profile](docs/coverage-profile.md) reproduces the
-B+D+C+S+E build with explicit `--min-cluster 40 --max-gap 500` run parameters.
-The previous coverage-50-250 preset remains available. Ordinary defaults remain
-unchanged. The 40/500 candidate exceeds the historical MUMmer4 coverage comparator,
-but its simulated median F1 is slightly below 50/250; see the profile's evidence.
+To install into a user-owned prefix:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j 8
-./build/ramag align --reference reference.fa --query query.fa \
-  --output result.paf --work-dir work --threads 8
+cmake --install build/release --prefix "$HOME/.local"
 ```
 
-An exit code of zero means all requested outputs were validated and published.
-Each CLI run writes `work/runs/<run-id>/run.log`. Alignment and index commands do
-not generate JSON manifests, SHA-256 digests or completion marker files.
-Ordinary alignment builds its reference index in memory; use `--save PATH` to
-persist it, or `--reference-index PATH` to reuse an existing index.
+See [installation](docs/installation.md) for offline dependencies, build options
+and installation checks.
 
-For several query assemblies against the same reference:
+## Run your first alignment
+
+Run from the repository root. The included inputs are small artificial sequences:
 
 ```bash
-./build/ramag batch --reference reference.fa --reference-index reference.sufidx \
-  --query query1.fa.gz --query query2.fa.gz --output-dir results --threads 8
+./build/release/ramag align \
+  --reference examples/genome/reference.fa \
+  --query examples/genome/query.fa \
+  --output results/first.paf \
+  --work-dir results/work \
+  --threads 2
 ```
 
-Alternatively use `--seqfile queries.txt` with one `name FASTA_path` per line.
-The seqfile is plain text; its filename extension is not significant.
-Batch defaults to PAF, records outcomes in `results/batch.tsv`, and continues
-after ordinary query failures. Its index stays resident between queries; peak
-memory can exceed a standalone alignment. See the [batch guide](docs/user-guide.md#batch-queries).
+Exit status zero means the requested output was validated and published. Open
+`results/first.paf` to inspect the mappings and `results/work/runs/*/run.log` for
+stage statistics. Use a new output prefix for another run: existing outputs are
+never overwritten.
 
-Sufkit and WFA2 are fetched at exact commits during configuration. The centromere
-backend is enabled by default on Linux; use `-DRAMAG_ENABLE_CENTROMERE=OFF` for a
-genome-only build without WFA2. Source-derived RaMA, KSW2, kseq and spdlog
-are vendored. The `cmake/` directory is required source, not a build artifact.
-Production builds do not require the internal `tests/` or `plan/` directories.
+## Common tasks
 
-RaMA-G currently provides no checkpoint/resume, calibrated MAPQ, compressed
-alignment output, variant calling or automatic genome-comparison report.
-Multi-file publication rolls back on handled failures; a forced process kill
-can leave a subset of output files. Check the process exit code before using them.
-No unqualified performance or accuracy claim against MUMmer4 is made.
-Historical design and experiment material, when present under `plan/`, describes
-the state at its recorded date; the two guides describe current behavior.
+### Save and reuse a reference index
+
+```bash
+./build/release/ramag index \
+  --reference examples/genome/reference.fa \
+  --output results/reference.sufidx \
+  --work-dir results/index-work
+
+./build/release/ramag align \
+  --reference examples/genome/reference.fa \
+  --reference-index results/reference.sufidx \
+  --query examples/genome/query.fa \
+  --output results/reused.paf \
+  --work-dir results/reused-work
+```
+
+### Align a centromere pair
+
+Each FASTA must contain exactly one record:
+
+```bash
+./build/release/ramag align \
+  -c \
+  --reference examples/centromere/reference.fa \
+  --query examples/centromere/query.fa \
+  --output-prefix results/centromere \
+  --threads 1
+```
+
+This writes SAM, PAF and MAF plus direction, anchor, copy, segment and gap TSVs.
+Only supported paths and gaps are aligned. Unresolved regions and ambiguous
+copies remain explicit; a completed run does not promise whole-input coverage.
+
+### Process several queries
+
+```bash
+./build/release/ramag batch \
+  --reference examples/genome/reference.fa \
+  --seqfile examples/batch/queries.txt \
+  --output-dir results/batch \
+  --threads 2
+```
+
+**Batch retains candidate-output semantics.** It shares a reference index and
+processes queries serially, but is not a repeated invocation of the linked
+one-to-one `align` workflow. Results are listed in `results/batch/batch.tsv`.
+
+## Choose an output
+
+| Entry point | Default formats | Other supported formats |
+|---|---|---|
+| `align --output-prefix PREFIX` | SAM, PAF, delta | MAF, chain |
+| `align --output FILE.paf` | Requested suffix only | SAM, MAF, delta, chain |
+| `align -c --output-prefix PREFIX` | SAM, PAF, MAF and TSV diagnostics | Select standard formats with `--formats` |
+| `batch` | PAF | SAM, MAF, delta, chain |
+
+PAF includes `cg` CIGAR. Centromere paths can share physical coordinates when an
+accepted copy relationship is present. A SAM primary/secondary designation is
+not a complete description of that relationship. See the [output contracts](docs/centromere-alignment-formats.md).
+
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Quick start](docs/quick-start.md)
+- [Commands, inputs and outputs](docs/user-guide.md)
+- [Algorithms](docs/algorithms.md) and [C++ libraries](docs/library.md)
+- [Development, testing and troubleshooting](docs/developer-guide.md)
+- [Migration from experimental interfaces](docs/migration.md)
+
+## Check a build
+
+Public tests use small synthetic inputs, not real genomes or benchmark datasets.
+Python 3 is needed for these tests; samtools is optional:
+
+```bash
+cmake --preset testing
+cmake --build --preset testing --parallel 4
+ctest --preset testing --output-on-failure --no-tests=error
+```
+
+## Scope and attribution
+
+RaMA-G is an assembly aligner, not a short-read mapper or variant caller. It does
+not provide calibrated MAPQ, compressed alignment output or alignment checkpoint
+resume. Handled publication failures roll back the current outputs; an unhandled
+process kill can leave a subset of files, so always check the exit status.
+
+RaMA-G is distributed under the [MIT license](LICENSE). Source-derived RaMA,
+KSW2, Sufkit, WFA2, Centrolign kernels and other dependencies retain their own
+licenses and attribution; see [third-party notices](THIRD_PARTY_NOTICES.md).
+Please report reproducible problems through the repository's GitHub issues.
+See [contributing](CONTRIBUTING.md) before proposing changes.

@@ -58,8 +58,6 @@ option(RAMAG_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSan
 option(RAMAG_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(RAMAG_ENABLE_PINNED_DEPENDENCIES
        "Fetch/validate the pinned sufkit snapshot for production adapters" ON)
-set(RAMAG_MUMMER4_BIN_DIR "" CACHE PATH
-    "Directory containing original delta-filter/show-coords/show-snps/show-diff/dnadiff")
 
 set(RAMAG_SUFKIT_COMMIT "028075e6f2d622fcbdcf76b153bbde0f069ca64f"
     CACHE STRING "Required sufkit commit")
@@ -139,15 +137,15 @@ if(RAMAG_ENABLE_PINNED_DEPENDENCIES AND OpenMP_C_FOUND)
 endif()
 
 add_library(ramag_core
-  src/alignment.cpp
-  src/cli.cpp
-  src/fasta.cpp
-  src/pipeline.cpp
-  src/reference_index.cpp
-  src/runtime.cpp
-  src/logging.cpp
-  src/sufkit_adapter.cpp
-  src/writers.cpp)
+  src/genome/core/alignment.cpp
+  src/app/cli.cpp
+  src/io/fasta.cpp
+  src/app/pipeline.cpp
+  src/index/reference_index.cpp
+  src/app/runtime.cpp
+  src/app/logging.cpp
+  src/index/sufkit_adapter.cpp
+  src/io/writers.cpp)
 add_library(RaMA-G::core ALIAS ramag_core)
 
 include(cmake/RaMAGPairwiseCore.cmake)
@@ -157,6 +155,7 @@ target_compile_features(ramag_core PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB Threads::Threads)
 include(cmake/RaMACentromere.cmake)
+target_include_directories(ramag_core PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_include_directories(ramag_core SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include ${PROJECT_SOURCE_DIR}/third_party/kseq)
 target_include_directories(
   ramag_core
@@ -206,291 +205,18 @@ if(RAMAG_ENABLE_SANITIZERS AND NOT MSVC)
   target_link_options(ramag_core PUBLIC -fsanitize=address,undefined)
 endif()
 
-add_executable(ramag src/main.cpp)
+add_executable(ramag src/app/main.cpp)
 target_link_libraries(ramag PRIVATE RaMA-G::core)
+target_include_directories(ramag PRIVATE "${PROJECT_SOURCE_DIR}/src")
 ramag_apply_project_warnings(ramag)
 
 install(TARGETS ramag RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag")
 
-if(BUILD_TESTING AND RAMAG_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit_tests.cpp")
-  if(TARGET sufkit::sufkit)
-    add_executable(ramag_index_storage_tests tests/index_storage_tests.cpp)
-    target_link_libraries(ramag_index_storage_tests PRIVATE RaMA-G::core sufkit::sufkit)
-    ramag_apply_project_warnings(ramag_index_storage_tests)
-    add_test(NAME ramag.index_storage COMMAND ramag_index_storage_tests)
-  endif()
-  add_executable(ramag_logging_input_tests tests/logging_input_tests.cpp)
-  target_include_directories(ramag_logging_input_tests SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include)
-  target_link_libraries(ramag_logging_input_tests PRIVATE RaMA-G::core Threads::Threads)
-  ramag_apply_project_warnings(ramag_logging_input_tests)
-  add_test(NAME ramag.logging_input COMMAND ramag_logging_input_tests)
-  add_executable(ramag_unified_core_tests tests/unified_core_tests.cpp)
-  target_link_libraries(ramag_unified_core_tests PRIVATE RaMA-G::core RaMAG::pairwise)
-  ramag_apply_project_warnings(ramag_unified_core_tests)
-  add_test(NAME ramag.unified.core COMMAND ramag_unified_core_tests)
-  add_executable(ramag_mainpath_link_tests tests/mainpath_link_tests.cpp)
-  target_link_libraries(ramag_mainpath_link_tests PRIVATE RaMAG::pairwise)
-  add_test(NAME ramag.pairwise.mainpath_link COMMAND ramag_mainpath_link_tests)
-  add_executable(ramag_gap_ambiguity_tests tests/gap_ambiguity_tests.cpp)
-  target_link_libraries(ramag_gap_ambiguity_tests PRIVATE RaMAG::pairwise)
-  add_test(NAME ramag.pairwise.gap_ambiguity COMMAND ramag_gap_ambiguity_tests)
-  add_executable(ramag_chain_recovery_tests tests/chain_recovery_tests.cpp)
-  target_link_libraries(ramag_chain_recovery_tests PRIVATE RaMAG::pairwise)
-  add_test(NAME ramag.pairwise.chain_recovery COMMAND ramag_chain_recovery_tests)
-  add_executable(ramag_repair_budget_contract_tests tests/repair_budget_contract_tests.cpp)
-  target_link_libraries(ramag_repair_budget_contract_tests PRIVATE RaMAG::pairwise)
-  add_test(NAME ramag.pairwise.repair_budget COMMAND ramag_repair_budget_contract_tests)
-  add_executable(ramag_vacant_chain_tests tests/vacant_chain_tests.cpp)
-  target_link_libraries(ramag_vacant_chain_tests PRIVATE RaMAG::pairwise)
-  add_test(NAME ramag.pairwise.vacant_chain COMMAND ramag_vacant_chain_tests)
-  if(TARGET ramag_pairwise AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/pairwise_core_tests.cpp")
-    add_library(ramag_pairwise_reference OBJECT tests/pairwise_reference_gap.cpp)
-    target_compile_features(ramag_pairwise_reference PRIVATE cxx_std_20)
-    target_include_directories(ramag_pairwise_reference PRIVATE third_party/ksw2)
-    target_link_libraries(ramag_pairwise_reference PRIVATE RaMAG::pairwise)
-    add_executable(ramag_pairwise_core_tests tests/pairwise_core_tests.cpp $<TARGET_OBJECTS:ramag_pairwise_reference>)
-    target_link_libraries(ramag_pairwise_core_tests PRIVATE RaMAG::pairwise)
-    ramag_apply_project_warnings(ramag_pairwise_core_tests)
-    add_test(NAME ramag.pairwise.core COMMAND ramag_pairwise_core_tests)
-  endif()
-  add_library(ramag_legacy_oracle STATIC tests/legacy_alignment_oracle.cpp)
-  target_link_libraries(ramag_legacy_oracle PRIVATE RaMA-G::core)
-  target_compile_features(ramag_legacy_oracle PRIVATE cxx_std_20)
-  ramag_apply_project_warnings(ramag_legacy_oracle)
-  add_executable(ramag_unit_tests tests/unit_tests.cpp)
-  target_link_libraries(ramag_unit_tests PRIVATE ramag_legacy_oracle RaMA-G::core)
-  ramag_apply_project_warnings(ramag_unit_tests)
-  add_test(NAME ramag.unit COMMAND ramag_unit_tests)
-
-  # Format conversion is independent of the optional computation backend.
-  add_executable(ramag_centromere_stitch_formats_tests tests/centromere_stitch_formats_tests.cpp)
-  target_link_libraries(ramag_centromere_stitch_formats_tests PRIVATE RaMAG::centromere)
-  ramag_apply_project_warnings(ramag_centromere_stitch_formats_tests)
-  if(RAMAG_ENABLE_SANITIZERS AND NOT MSVC)
-    target_compile_options(ramag_centromere_stitch_formats_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(ramag_centromere_stitch_formats_tests PRIVATE -fsanitize=address,undefined)
-  endif()
-  add_test(NAME ramag.centromere.stitch_formats COMMAND ramag_centromere_stitch_formats_tests)
-
-  add_executable(ramag_centromere_interface_tests tests/centromere_interface_tests.cpp)
-  if(RAMAG_ENABLE_CENTROMERE)
-    include(cmake/RaMACentromereTests.cmake)
-    add_executable(ramag_centromere_backend_tests tests/centromere_backend_tests.cpp)
-    target_include_directories(ramag_centromere_backend_tests PRIVATE src)
-    target_include_directories(ramag_centromere_backend_tests SYSTEM PRIVATE third_party/rama/core)
-    target_include_directories(ramag_centromere_backend_tests SYSTEM PRIVATE "${_wfa}")
-    target_link_libraries(ramag_centromere_backend_tests PRIVATE RaMAG::centromere)
-    ramag_apply_project_warnings(ramag_centromere_backend_tests)
-    add_test(NAME ramag.centromere.backend COMMAND ramag_centromere_backend_tests "${PROJECT_SOURCE_DIR}/tests/fixtures")
-  else()
-    add_executable(ramag_centromere_disabled_tests tests/centromere_disabled_backend_tests.cpp)
-    target_include_directories(ramag_centromere_disabled_tests PRIVATE src)
-    target_link_libraries(ramag_centromere_disabled_tests PRIVATE RaMAG::centromere)
-    ramag_apply_project_warnings(ramag_centromere_disabled_tests)
-    add_test(NAME ramag.centromere.disabled-backend COMMAND ramag_centromere_disabled_tests)
-  endif()
-  target_link_libraries(ramag_centromere_interface_tests PRIVATE RaMA-G::core)
-  ramag_apply_project_warnings(ramag_centromere_interface_tests)
-  add_test(NAME ramag.centromere.interface COMMAND ramag_centromere_interface_tests)
-  add_test(NAME ramag.centromere.cli
-    COMMAND "${CMAKE_COMMAND}" -DRAMAG_EXE=$<TARGET_FILE:ramag>
-      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/centromere-cli-check
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/centromere_cli.cmake)
-
-  add_test(
-    NAME ramag.openmp.config
-    COMMAND "${CMAKE_COMMAND}"
-      -DRAMAG_EXE=$<TARGET_FILE:ramag>
-      -DOPENMP_C_FOUND=${OpenMP_C_FOUND}
-      -DOPENMP_CXX_FOUND=${OpenMP_CXX_FOUND}
-      -DEXPECTED_OPENMP_RUNTIME=${RAMAG_OPENMP_RUNTIME_NAME}
-      -DEXPECTED_OPENMP_SPEC_DATE=${OpenMP_CXX_SPEC_DATE}
-      -DEXPECTED_DIVSUFSORT_OPENMP=${RAMAG_SUFKIT_DIVSUFSORT_OPENMP_VALUE}
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/openmp_config.cmake)
-  add_test(
-    NAME ramag.openmp.required
-    COMMAND "${CMAKE_COMMAND}"
-      -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/openmp-required-configure
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/openmp_required.cmake)
-
-  if(TARGET ramag_pairwise)
-    add_executable(ramag_coverage_replay tests/coverage_replay.cpp)
-    target_link_libraries(ramag_coverage_replay PRIVATE ramag_pairwise RaMA-G::core)
-    target_include_directories(ramag_coverage_replay PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-    # This private harness includes the source-attributed kernel, so use the
-    # same warning contract as that kernel (without weakening production).
-    if(NOT MSVC)
-      target_compile_options(ramag_coverage_replay PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter)
-      if(RAMAG_WARNINGS_AS_ERRORS)
-        target_compile_options(ramag_coverage_replay PRIVATE -Werror)
-      endif()
-    endif()
-    add_executable(ramag_post_selection_replay tests/post_selection_replay.cpp)
-    add_test(NAME ramag.pairwise.bounded_extension COMMAND ramag_post_selection_replay --bounded-self-test)
-    target_link_libraries(ramag_post_selection_replay PRIVATE ramag_pairwise RaMA-G::core)
-    target_include_directories(ramag_post_selection_replay PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-    if(NOT MSVC)
-      target_compile_options(ramag_post_selection_replay PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation)
-      if(RAMAG_WARNINGS_AS_ERRORS)
-        target_compile_options(ramag_post_selection_replay PRIVATE -Werror)
-      endif()
-    endif()
-    foreach(_case frontend_geometry low_overhead_coverage)
-      if(EXISTS "${PROJECT_SOURCE_DIR}/tests/${_case}_tests.cpp")
-        add_executable(ramag_${_case}_tests tests/${_case}_tests.cpp)
-        target_link_libraries(ramag_${_case}_tests PRIVATE ramag_pairwise)
-        target_include_directories(ramag_${_case}_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-        if(OpenMP_CXX_FOUND)
-          target_link_libraries(ramag_${_case}_tests PRIVATE OpenMP::OpenMP_CXX)
-        endif()
-        if(NOT MSVC)
-          target_compile_options(ramag_${_case}_tests PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation)
-          if(RAMAG_WARNINGS_AS_ERRORS)
-            target_compile_options(ramag_${_case}_tests PRIVATE -Werror)
-          endif()
-        endif()
-        add_test(NAME ramag.${_case} COMMAND ramag_${_case}_tests)
-      endif()
-    endforeach()
-    add_executable(ramag_post_selection_tests tests/post_selection_tests.cpp)
-    target_link_libraries(ramag_post_selection_tests PRIVATE ramag_pairwise)
-    target_include_directories(ramag_post_selection_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-    if(NOT MSVC)
-      target_compile_options(ramag_post_selection_tests PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation)
-      if(RAMAG_WARNINGS_AS_ERRORS)
-        target_compile_options(ramag_post_selection_tests PRIVATE -Werror)
-      endif()
-    endif()
-    if(OpenMP_CXX_FOUND)
-      target_link_libraries(ramag_post_selection_tests PRIVATE OpenMP::OpenMP_CXX)
-      target_link_libraries(ramag_post_selection_replay PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-    add_test(NAME ramag.pairwise.post_selection COMMAND ramag_post_selection_tests)
-    add_executable(ramag_fragment_selection_tests tests/fragment_selection_tests.cpp)
-    target_link_libraries(ramag_fragment_selection_tests PRIVATE ramag_pairwise)
-    target_include_directories(ramag_fragment_selection_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-    if(OpenMP_CXX_FOUND)
-      target_link_libraries(ramag_fragment_selection_tests PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-    if(NOT MSVC)
-      target_compile_options(ramag_fragment_selection_tests PRIVATE -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation)
-      if(RAMAG_WARNINGS_AS_ERRORS)
-        target_compile_options(ramag_fragment_selection_tests PRIVATE -Werror)
-      endif()
-    endif()
-    add_test(NAME ramag.pairwise.fragment_selection COMMAND ramag_fragment_selection_tests)
-    add_executable(ramag_pairwise_memory_tests tests/pairwise_memory_tests.cpp)
-    target_compile_definitions(ramag_pairwise_memory_tests PRIVATE RAMAG_INTERNAL_COVERAGE_RECOVERY=$<BOOL:${RAMAG_INTERNAL_COVERAGE_RECOVERY}>)
-    target_link_libraries(ramag_pairwise_memory_tests PRIVATE ramag_pairwise)
-    target_include_directories(ramag_pairwise_memory_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
-    if(OpenMP_CXX_FOUND)
-      target_link_libraries(ramag_pairwise_memory_tests PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-    add_test(NAME ramag.pairwise.memory COMMAND ramag_pairwise_memory_tests)
-  endif()
-
-  add_executable(ramag_seed_oracle_tests tests/seed_oracle_tests.cpp)
-  target_link_libraries(ramag_seed_oracle_tests PRIVATE RaMA-G::core)
-  ramag_apply_project_warnings(ramag_seed_oracle_tests)
-  add_test(NAME ramag.seed_oracle COMMAND ramag_seed_oracle_tests)
-
-  add_executable(ramag_adapter_differential_tests
-                 tests/adapter_differential_tests.cpp)
-  target_link_libraries(ramag_adapter_differential_tests PRIVATE RaMA-G::core)
-  if(TARGET OpenMP::OpenMP_CXX)
-    target_link_libraries(ramag_adapter_differential_tests PRIVATE OpenMP::OpenMP_CXX)
-  endif()
-  ramag_apply_project_warnings(ramag_adapter_differential_tests)
-  add_test(NAME ramag.adapter_differential COMMAND ramag_adapter_differential_tests)
-
-  add_executable(ramag_chaining_tests tests/chaining_tests.cpp)
-  target_link_libraries(ramag_chaining_tests PRIVATE ramag_legacy_oracle RaMA-G::core)
-  ramag_apply_project_warnings(ramag_chaining_tests)
-  if(RAMAG_ENABLE_SANITIZERS)
-    add_test(NAME ramag.chaining COMMAND ramag_chaining_tests --skip-scale)
-  else()
-    add_test(NAME ramag.chaining COMMAND ramag_chaining_tests)
-  endif()
-  set_tests_properties(ramag.chaining PROPERTIES
-    TIMEOUT 180
-    LABELS "chaining;scale")
-
-  foreach(gate_mode IN ITEMS clean dirty wrong-commit abbreviated-commit missing)
-    add_test(
-      NAME ramag.dependency_gate.${gate_mode}
-      COMMAND "${CMAKE_COMMAND}"
-        -DGATE_MODE=${gate_mode}
-        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/dependency-gate-${gate_mode}
-        -DMODULE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/cmake/RaMAGitSnapshot.cmake
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_override_gate.cmake)
-  endforeach()
-  set_tests_properties(
-    ramag.dependency_gate.dirty
-    ramag.dependency_gate.wrong-commit
-    ramag.dependency_gate.abbreviated-commit
-    ramag.dependency_gate.missing
-    PROPERTIES WILL_FAIL TRUE)
-
-  add_test(
-    NAME ramag.integration.smoke
-    COMMAND "${CMAKE_COMMAND}"
-      -DRAMAG_EXE=$<TARGET_FILE:ramag>
-      -DEXPECTED_SUFKIT_COMMIT=${RAMAG_SUFKIT_COMMIT}
-      -DEXPECTED_DIVSUFSORT_OPENMP=${RAMAG_SUFKIT_DIVSUFSORT_OPENMP_VALUE}
-      -DEXPECT_PINNED_ADAPTERS=${RAMAG_ENABLE_PINNED_DEPENDENCIES}
-      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/integration-smoke
-      -DRAMAG_ALIGNMENT_CORE=pairwise
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_smoke.cmake)
-
-  if(UNIX)
-    add_test(
-      NAME ramag.integration.signals
-      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_smoke.sh
-        $<TARGET_FILE:ramag>
-        ${CMAKE_CURRENT_BINARY_DIR}/signal-smoke)
-  endif()
-
-  find_program(RAMAG_SAMTOOLS_EXECUTABLE samtools)
-  if(RAMAG_SAMTOOLS_EXECUTABLE)
-    add_test(
-      NAME ramag.integration.samtools
-      COMMAND "${RAMAG_SAMTOOLS_EXECUTABLE}" view -h -o /dev/null
-              ${CMAKE_CURRENT_BINARY_DIR}/integration-smoke/result.sam)
-    set_tests_properties(ramag.integration.samtools PROPERTIES
-      DEPENDS ramag.integration.smoke)
-  endif()
-
-  if(RAMAG_MUMMER4_BIN_DIR)
-    foreach(tool IN ITEMS delta-filter show-coords show-snps show-diff dnadiff mummer)
-      if(NOT EXISTS "${RAMAG_MUMMER4_BIN_DIR}/${tool}")
-        message(FATAL_ERROR "Missing MUMmer4 compatibility tool: ${RAMAG_MUMMER4_BIN_DIR}/${tool}")
-      endif()
-    endforeach()
-    add_test(
-      NAME ramag.integration.mummer4
-      COMMAND "${CMAKE_COMMAND}"
-        -DRAMAG_EXE=$<TARGET_FILE:ramag>
-        -DMUMMER_BIN_DIR=${RAMAG_MUMMER4_BIN_DIR}
-        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/mummer4-compat
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/mummer4_compat.cmake)
-    # Local libtool `.libs` utilities depend on the sibling uninstalled
-    # libumdmummer shared object.  Make that runtime dependency explicit for
-    # the compatibility test instead of relying on the caller's shell.
-    set_tests_properties(ramag.integration.mummer4 PROPERTIES
-      ENVIRONMENT_MODIFICATION
-        "LD_LIBRARY_PATH=path_list_prepend:${RAMAG_MUMMER4_BIN_DIR}")
-
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    add_test(
-      NAME ramag.integration.mummer4.mum_oracle
-      COMMAND "${Python3_EXECUTABLE}"
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/mummer4_mum_oracle.py
-        --mummer ${RAMAG_MUMMER4_BIN_DIR}/mummer
-        --test-root ${CMAKE_CURRENT_BINARY_DIR}/mummer4-mum-oracle)
-    set_tests_properties(ramag.integration.mummer4.mum_oracle PROPERTIES
-      ENVIRONMENT_MODIFICATION
-        "LD_LIBRARY_PATH=path_list_prepend:${RAMAG_MUMMER4_BIN_DIR}")
+if(BUILD_TESTING AND RAMAG_BUILD_TESTS)
+  # Public synthetic checks must not depend on internal fixture availability.
+  add_subdirectory(tests/public)
+  if(EXISTS "${PROJECT_SOURCE_DIR}/cmake/RaMAInternalTests.cmake")
+    include(cmake/RaMAInternalTests.cmake)
   endif()
 endif()

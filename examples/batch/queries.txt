@@ -1,5 +1,3 @@
-# Query name followed by a FASTA path; replace these example paths.
-# Relative paths are resolved from this file's directory.
-chimp data/chimp.fa.gz
-gorilla data/gorilla.fa.gz
-orangutan data/orangutan.fa.gz
+# Query paths are relative to this seqfile.
+forward ../genome/query.fa
+reverse ../genome/reverse.fa

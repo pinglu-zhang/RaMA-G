@@ -1,47 +1,33 @@
-# Licensed dependencies live in third_party/; no network or Rust is
-# required by this library. No Sufkit/SeqPro/graph dependency is exposed.
-add_library(ramag_pairwise STATIC src/pairwise_core.cpp third_party/ksw2/ksw2_extz2_sse.c)
-option(RAMAG_INTERNAL_COVERAGE_RECOVERY "Enable experimental residual recovery in one-to-one CLI" OFF)
-set(RAMAG_INTERNAL_GAP_FILL "off" CACHE STRING "Experimental guarded gap fill: off|exact-gap|ksw2-gap|budgeted-ksw2-gap-v1")
-set_property(CACHE RAMAG_INTERNAL_GAP_FILL PROPERTY STRINGS off exact-gap ksw2-gap budgeted-ksw2-gap-v1)
-set(_ramag_gap_modes off exact-gap ksw2-gap budgeted-ksw2-gap-v1)
-list(FIND _ramag_gap_modes "${RAMAG_INTERNAL_GAP_FILL}" _ramag_gap_mode)
-if(_ramag_gap_mode EQUAL -1)
-  message(FATAL_ERROR "RAMAG_INTERNAL_GAP_FILL must be off|exact-gap|ksw2-gap|budgeted-ksw2-gap-v1")
-endif()
-option(RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES "Retain valid candidates not consumed by a successful link" OFF)
-option(RAMAG_INTERNAL_LINK_PRECHECK "Check connection legality before ranking" OFF)
-option(RAMAG_INTERNAL_GUARDED_RECOVERY "Require reliable original flanks for residual recovery" OFF)
-mark_as_advanced(RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES RAMAG_INTERNAL_LINK_PRECHECK RAMAG_INTERNAL_GUARDED_RECOVERY)
-target_compile_definitions(ramag_pairwise PRIVATE
-  RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES=$<BOOL:${RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES}>
-  RAMAG_INTERNAL_LINK_PRECHECK=$<BOOL:${RAMAG_INTERNAL_LINK_PRECHECK}>
-  RAMAG_INTERNAL_GUARDED_RECOVERY=$<BOOL:${RAMAG_INTERNAL_GUARDED_RECOVERY}>)
-set(RAMAG_INTERNAL_POST_SELECTION "baseline" CACHE STRING "Experimental post selection: baseline|one-sided-guarded-v1|fragment-reselect-v1")
-set_property(CACHE RAMAG_INTERNAL_POST_SELECTION PROPERTY STRINGS baseline one-sided-guarded-v1 fragment-reselect-v1)
-set(_ramag_post_modes baseline one-sided-guarded-v1 fragment-reselect-v1)
-list(FIND _ramag_post_modes "${RAMAG_INTERNAL_POST_SELECTION}" _ramag_post_mode)
-if(_ramag_post_mode EQUAL -1)
-  message(FATAL_ERROR "RAMAG_INTERNAL_POST_SELECTION must be baseline|one-sided-guarded-v1|fragment-reselect-v1")
-endif()
-if(_ramag_post_mode GREATER 0 AND (RAMAG_INTERNAL_COVERAGE_RECOVERY OR RAMAG_INTERNAL_GUARDED_RECOVERY OR (_ramag_post_mode EQUAL 1 AND NOT _ramag_gap_mode EQUAL 0)))
-  message(FATAL_ERROR "post-selection strategies are mutually exclusive with recovery and gap-fill")
-endif()
-mark_as_advanced(RAMAG_INTERNAL_POST_SELECTION)
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_POST_SELECTION=${_ramag_post_mode})
-mark_as_advanced(RAMAG_INTERNAL_GAP_FILL)
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_GAP_FILL=${_ramag_gap_mode})
-mark_as_advanced(RAMAG_INTERNAL_COVERAGE_RECOVERY)
-target_compile_definitions(ramag_pairwise PRIVATE
-  RAMAG_INTERNAL_COVERAGE_RECOVERY=$<BOOL:${RAMAG_INTERNAL_COVERAGE_RECOVERY}>)
-option(RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS "Enable private coverage capture in CLI bridge" OFF)
-mark_as_advanced(RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS)
-target_compile_definitions(ramag_pairwise PRIVATE
-  RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS=$<BOOL:${RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS}>)
+# Historical whole-genome experiment variants are no longer product options.
+foreach(_retired IN ITEMS
+    RAMAG_INTERNAL_COVERAGE_RECOVERY
+    RAMAG_INTERNAL_GAP_FILL
+    RAMAG_INTERNAL_PRESERVE_LINK_CANDIDATES
+    RAMAG_INTERNAL_LINK_PRECHECK
+    RAMAG_INTERNAL_GUARDED_RECOVERY
+    RAMAG_INTERNAL_POST_SELECTION
+    RAMAG_INTERNAL_COVERAGE_DIAGNOSTICS
+    RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE
+    RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT
+    RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS
+    RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN
+    RAMAG_INTERNAL_STRAND_AWARE_MERGE
+    RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL
+    RAMAG_INTERNAL_HALF_OPEN_CHAINING
+    RAMAG_INTERNAL_SUPPLEMENT_SHORT_CHAIN
+    RAMAG_INTERNAL_EXTEND_SELECTED_ENDPOINTS
+)
+  if(DEFINED ${_retired})
+    message(FATAL_ERROR "${_retired} has been retired. Use a fresh build directory without historical experiment options.")
+  endif()
+endforeach()
+
+# Licensed fixed-end KSW2 and the selected main-path core are always built.
+add_library(ramag_pairwise STATIC src/genome/core/pairwise.cpp third_party/ksw2/ksw2_extz2_sse.c)
 add_library(RaMAG::pairwise ALIAS ramag_pairwise)
 set_target_properties(ramag_pairwise PROPERTIES EXPORT_NAME pairwise POSITION_INDEPENDENT_CODE ON)
 target_compile_features(ramag_pairwise PUBLIC cxx_std_20)
-target_include_directories(ramag_pairwise PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2)
+target_include_directories(ramag_pairwise PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2 ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(ramag_pairwise PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -74,50 +60,7 @@ install(EXPORT RaMAGPairwiseTargets NAMESPACE RaMAG:: DESTINATION ${CMAKE_INSTAL
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RaMAGPairwiseConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/RaMAGPairwiseConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGPairwise)
 install(FILES include/ramag/pairwise_core.hpp include/ramag/alignment.hpp include/ramag/model.hpp
-  include/ramag/repair_budget.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
 install(FILES third_party/ksw2/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/ksw2)
 install(FILES third_party/kseq/kseq.h DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/kseq)
 install(FILES third_party/spdlog/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/spdlog)
-
-option(RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE "Experimental FRAGMENT_LOCAL_EXCHANGE" OFF)
-mark_as_advanced(RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE)
-if(RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE AND NOT _ramag_post_mode EQUAL 2)
-  message(FATAL_ERROR "FRAGMENT_LOCAL_EXCHANGE requires fragment-reselect-v1")
-endif()
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE=$<BOOL:${RAMAG_INTERNAL_FRAGMENT_LOCAL_EXCHANGE}>)
-option(RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT "Experimental FRAGMENT_SHORT_EXACT" OFF)
-mark_as_advanced(RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT)
-if(RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT AND NOT _ramag_post_mode EQUAL 2)
-  message(FATAL_ERROR "FRAGMENT_SHORT_EXACT requires fragment-reselect-v1")
-endif()
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT=$<BOOL:${RAMAG_INTERNAL_FRAGMENT_SHORT_EXACT}>)
-option(RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS "Experimental SUPPLEMENT_PRUNED_CLUSTERS" OFF)
-mark_as_advanced(RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS)
-if(RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS AND NOT _ramag_post_mode EQUAL 2)
-  message(FATAL_ERROR "SUPPLEMENT_PRUNED_CLUSTERS requires fragment-reselect-v1")
-endif()
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS=$<BOOL:${RAMAG_INTERNAL_SUPPLEMENT_PRUNED_CLUSTERS}>)
-option(RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN "Experimental SUPPLEMENT_ALTERNATIVE_CHAIN" OFF)
-mark_as_advanced(RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN)
-if(RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN AND NOT _ramag_post_mode EQUAL 2)
-  message(FATAL_ERROR "SUPPLEMENT_ALTERNATIVE_CHAIN requires fragment-reselect-v1")
-endif()
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN=$<BOOL:${RAMAG_INTERNAL_SUPPLEMENT_ALTERNATIVE_CHAIN}>)
-
-option(RAMAG_INTERNAL_STRAND_AWARE_MERGE "Experimental checked seed geometry" OFF)
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_STRAND_AWARE_MERGE=$<BOOL:${RAMAG_INTERNAL_STRAND_AWARE_MERGE}>)
-
-option(RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL "Experimental checked seed geometry" OFF)
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL=$<BOOL:${RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL}>)
-
-option(RAMAG_INTERNAL_HALF_OPEN_CHAINING "Experimental checked seed geometry" OFF)
-target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_HALF_OPEN_CHAINING=$<BOOL:${RAMAG_INTERNAL_HALF_OPEN_CHAINING}>)
-
-foreach(_strategy SUPPLEMENT_SHORT_CHAIN EXTEND_SELECTED_ENDPOINTS)
-  option(RAMAG_INTERNAL_${_strategy} "Experimental bounded extension" OFF)
-  mark_as_advanced(RAMAG_INTERNAL_${_strategy})
-  if(RAMAG_INTERNAL_${_strategy} AND NOT _ramag_post_mode EQUAL 2)
-    message(FATAL_ERROR "${_strategy} requires fragment-reselect-v1")
-  endif()
-  target_compile_definitions(ramag_pairwise PRIVATE RAMAG_INTERNAL_${_strategy}=$<BOOL:${RAMAG_INTERNAL_${_strategy}}>)
-endforeach()

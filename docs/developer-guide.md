@@ -1,270 +1,90 @@
-# RaMA-G developer guide
+# Development and troubleshooting
 
-## Architecture and invariants
+## Source map
 
-RaMA-G separates normalized sequence input, Sufkit seed enumeration, the standalone
-pairwise KSW2 core and output serialization. Internal coordinates are 64-bit,
-zero-based and half-open. Query coordinates refer to the original forward record
-on either strand; oriented query begin is `query_length - query_end` for minus
-records. Contig boundaries and `N` break seeds. Occurrences are not sampled away.
+The product has two workflows sharing input, indexing, CIGAR and output contracts:
 
-| Layer | Responsibility |
-|---|---|
-| CLI/runtime | Parameters, launch CPU affinity, thread budget and signal flags |
-| FASTA | kseq plus a strict streaming validation wrapper over zlib |
-| Index/adapter | Full Sufkit SA, persistence, capabilities and seed conversion |
-| Pairwise core | Seed grouping, clustering, KSW2 extension/linking, bilateral selection |
-| Writers/pipeline | Final immutable records, validation and no-replace publication |
-| Logging | Optional CLI-owned spdlog sinks and retained run statistics |
+- Application entry, workflow orchestration, logging and cancellation.
+- FASTA and common alignment writers.
+- Reference index and Sufkit adapter.
+- Genome core and bounded main-path linking.
+- Centromere backend, direction, anchors, copies, stitching, review and output.
 
-`SequenceRecord` owns name, full header and normalized bases. `Seed` carries
-contig IDs, strand and exact coordinates. `AlignmentRecord` owns coordinates,
-score, edit distance, status and canonical `=/X/I/D` CIGAR. Ambiguous `M` is resolved
-against bases before serialization; `N/N` is not a canonical match. Overflow,
-consumption, bounds and nonzero operations are checked.
+Private code is organized under these functional directories. Installed
+`include/ramag` headers define the supported library boundary. A file's presence
+in a source checkout does not make it a public API. Third-party code remains in
+`third_party` with original licensing and source attribution.
 
-## Input and dependencies
-
-Centromere declarations are held in `RunSpec::centromere`; the separate
-`centromere.hpp` module parses BED, validates sequence bounds without copying
-sequence data, and distinguishes whole-input from annotated-genome scope.
-Both the CLI and `RunAlignmentPipeline()` check backend readiness before
-starting alignment. The default CLI calls `FindCentromereAnchors()` and stops
-before gap alignment. `AlignCentromeres()` retains the complete single-pair
-library route independently of Sufkit/KSW2. BED mixed mode and builds without the backend
-raise `DependencyError` rather than falling back to pairwise. Parsing and
-`--print-effective-config` remain usable. See the
-[input contract](centromere-interface.md) for the exact options and limitations.
-
-The installed `RaMAG::centromere` target is discovered with
-`find_package(RaMAGCentromere CONFIG REQUIRED)`; it needs no host logger, signal
-handler or affinity changes. See [the integration notes](centromere-rama-integration.md)
-for source-derived algorithm rules, callback ownership and safety patches.
-
-The validated read callback checks raw decompressed bytes before kseq can skip
-invalid FASTA or accept FASTQ. It tracks line state and a bounded read-ahead queue
-of complete headers, preserving descriptions independently of kseq tokenization.
-Errors from gzip CRC/truncation and normal EOF are distinguished. File and parser
-storage are RAII-owned. Plain and gzip input take the same normalization route;
-no SeqPro/FAI path remains. The frozen parser's `int` length boundary is checked
-explicitly for an individual record. Record collections and resulting alignment
-coordinates remain 64-bit.
-
-Reference and query reading retain stable result/error slots and may use two
-OpenMP workers within the requested budget. No exception crosses an OpenMP
-structured block. The full normalized inputs remain materialized.
-
-Sufkit stays at `028075e6f2d622fcbdcf76b153bbde0f069ca64f`. Its exact clean checkout
-is checked at configuration; its optional SeqPro integration remains disabled.
-KSW2, kseq and spdlog are vendored; spdlog uses bundled fmt. kseq/spdlog snapshots
-come from the frozen source revision recorded in the root third-party notices.
-
-## Index and seeds
-
-Fast standalone SA retains SA, ISA, LCP and suffix links at sampling rate one.
-New indexes use byte-coded LCP, preserving every decoded value. CaPS is selected
-for references at or above the existing 64 MiB threshold when parallel building
-is applicable; smaller construction uses bundled divsufsort. The executable
-captures launch affinity before libgomp initialization and restores only that
-authorized set. Library calls do not widen their caller's affinity.
-
-Ephemeral construction does not serialize. Saving calls `Save()` on the existing
-index, self-validates the temporary file using `Load()`, then publishes it without
-replacement. Loading validates the Sufkit format, CRC, SA structure, sampling and
-capabilities. Contig catalog and Sufkit reference fingerprint are compared against
-the supplied reference. No SHA-256 or sidecar identity is used. Raw and byte-coded
-files retain their stored representation; loading never rebuilds implicitly.
-
-RaMA-G supplies the caller's thread budget to `SuffixArray::Load(path, options)`.
-The original Sufkit `Load(path)` overload remains single-threaded by default.
-On Linux the loader checks that the requested budget fits the allowed CPU set.
-Bounded section readers accumulate CRC while decoding; all sections, including
-unconsumed ones, must pass CRC before an index is returned. Linux reads refer to
-the same opened inode. Other platforms retain the full-validation fallback.
-
-For a full ISA, range checks and the relation `SA[ISA[p]] == p` establish a
-bijection between positions and ranks, replacing the redundant permutation
-bitmap. Consistency checks use deterministic parallel chunks and report the
-smallest failing position. The no-ISA compatibility path retains permutation
-validation. Fast prefix-directory reconstruction receives the loading thread
-budget and preserves the directory layout. Byte-coded LCP stays compressed.
-
-Reference matching uses read-only sequence views instead of constructing another
-owning `GenomeReference`. Metadata, ambiguity and reference fingerprint checks
-remain active. Loading statistics and callbacks report section phases, logical
-bytes, CRC CPU time and elapsed load time. RaMA-G logs Sufkit load and reference
-validation separately; nested measurements must not be added to their totals.
-
-Both query orientations are searched. MEMs are bilateral maximal exact matches;
-MAMs additionally require reference uniqueness. Strict MUMs require uniqueness in
-the reference collection and current query orientation/record. Generalized SMEMs
-retain eligible query intervals not properly contained in another eligible
-interval and expand all reference occurrences.
-
-`maxmatch` enumerates all MEM occurrences. `mumreference` uses stable 4 MiB tiles,
-whole-record maximality checks, boundary MEM recovery and reference-uniqueness
-verification. `mum` and `smem` use whole-query-record serial enumeration.
-`fast` uses the existing MAM skeleton followed by whole-query MEM filtering.
-It assigns stable task IDs `2*i` and `2*i+1` to the forward and reverse
-orientations of record `i`. OpenMP schedules whole-record tasks dynamically,
-up to the smaller of the requested thread count and task count. Inside an
-existing OpenMP region, enumeration runs serially rather than nesting teams.
-Each task searches only the forward strand of its oriented sequence, owns its
-coverage intervals, chunked seeds and counters, and releases its temporary
-reverse complement on completion. Reverse coordinates are converted back to
-the original query coordinates. All MEM searches still run in full.
-Callbacks share only the immutable index; exceptions are captured per task,
-peers stop cooperatively, and failures are rethrown outside the parallel region.
-Task-order merging and final sorting preserve seed and alignment determinism.
-The existing query thread/task statistics report the actual execution route.
-Task results merge in deterministic order before final sorting/deduplication.
-Small independent oracles remain internal tests, not production fallback routes.
-
-## Batch ownership and execution
-
-`BatchSpec` contains shared alignment settings and ordered named query paths.
-The parser accepts either repeated query paths or a name/path seqfile and
-preflights shared settings, names and planned output collisions. Individual
-query readability and content failures are handled by the execution loop.
-
-`RunBatchPipeline` owns one `FastaData` reference and one `SufkitSeedIndex`.
-`RunAlignmentPipeline` and batch use the same internal execution function,
-which accepts an optional borrowed reference/index. Standalone alignment owns
-and releases its index after seeding; batch borrows the persistent shared object
-and releases each query's input, seeds and core result before advancing.
-Initialization callbacks use no dangling per-query captures. No global mutable
-index cache or duplicate pairwise implementation is introduced.
-
-`BatchOutcome` owns lightweight per-query outcomes and shared Build/Load call
-counts, not full records. CLI callers receive query logs and a flushed TSV
-status table. Library callers opt into a logger and retain their own affinity
-and signal policies; no new installed library target is added. Query execution
-is serial, with internal stage parallelism confined to the shared thread budget.
-
-The TSV is claimed exclusively. Normal outcomes are appended in input order;
-fatal initialization or interruption appends remaining not-run rows. It is not
-a checkpoint or a transaction marker. Each query uses the existing independent
-writer transaction. Shared initialization/allocation failures terminate the
-batch, while ordinary query exceptions leave the shared index intact and permit
-the next query. A saved reference index has its own publication lifetime.
-Logs report shared initialization once and index reuse per query. Retaining the
-index during pairwise processing intentionally differs from standalone memory
-lifetimes; no memory or throughput improvement is asserted without measurement.
-
-## Pairwise algorithm and memory
-
-The core groups and filters anchors by reference/query contig and direction,
-merges according to the existing diagonal rules, forms clusters, recovers the
-best supporting chain and applies minimum support. It materializes alignment
-anchors, extends components and attempts connections under the current windows,
-gap limits, quality and closure rules.
-
-KSW2 uses the existing scaled HOXD70 matrix and gap convention. Exact and simple
-gap paths precede global KSW2. Global alignment uses the existing bandwidth
-optimality check, widening or full calculation when necessary. Endpoint extension
-and per-worker scratch reuse remain unchanged. Scores used for DP, selection and
-serialized records have distinct purposes and are not interchangeable.
-
-Ordinary CLI `align` fixes `LinkedOneToOne`, bounded linking and no recovery at
-the parsing boundary. It does not change `AlignmentOptions` library defaults or
-resident `batch` candidate-output semantics. The former three selection/linking/
-recovery CLI switches are rejected.
-
-Reference-side and query-side DP selection retain their current scores and
-tie-breaking. `one-to-one` intersects the two selected candidate sets; `all`
-exposes valid preselection records. No former legacy reciprocal interval selector
-is applied afterward. Optional residual recovery clips eligible unused portions
-of rejected packed-CIGAR candidates. Optional guarded gap fill uses reliable
-original flanks, fixed nonrecursive candidates, exact or current KSW2 alignment
-and bilateral occupancy checks. Their existing build defaults remain unchanged.
-
-The index is destroyed after seed enumeration. The CLI transfers Seed ownership
-into the core; the const-span library entry copies once. Task seed chunks are
-released during final collection. Only output candidates expand packed CIGAR
-into final records. Capacity estimates and RSS observations describe individual
-stages, not additive peaks. Resource failure is explicit; there is no spill or
-automatic checkpoint path.
-
-## Output and logs
-
-All writers consume the same immutable finalized record set. SAM performs reverse
-flag/hard-clip and MD/NM conversion; PAF carries original-forward intervals and
-extended CIGAR. Delta encodes one-based inclusive endpoints and indel displacements.
-MAF reconstructs paired gapped rows, using `query_size-query_end` on minus strands.
-Chain converts aligned runs to blocks and I/D to query/target gaps, removing
-unrepresentable terminal gaps. Writer validation checks coordinate/consumption
-closure and format constraints before publication.
-
-Output publication uses temporary siblings and no-replace hard links. A scope
-guard rolls back names still referring to this run's inodes on handled failure.
-The independent saved-index transaction survives later alignment failure.
-No manifest, SHA-256, JSON failure diagnostic or completion marker is generated.
-There is no multi-file crash-atomic guarantee: callers must retain process exit
-status and validate expected outputs after a forced termination.
-
-`RunLogger` owns unregistered spdlog file and stderr loggers. The CLI creates it
-in a fresh private run directory and passes it explicitly to high-level pipelines.
-Default library calls create no logger and do not change host global logging or
-install signal handlers. The standalone installed pairwise target has no logging
-dependency. Effective config may still be printed as JSON to stdout on request.
-
-Stage changes, timing summaries, input/index metadata, actual worker statistics,
-memory observations, pairwise counters and artifacts are written to `run.log`.
-Periodic terminal progress obeys auto/on/off; explicit snapshots remain available.
-The progress watcher has bounded waits and reports failures back to normal flow.
-Only flag updates occur in signal handlers. Sufkit's noncancellable internal work
-can delay response; normal boundaries check interruption and flush diagnostics.
-
-## Library use and verification
+## Build and public tests
 
 ```bash
-cmake --install build-release --prefix "$PWD/install"
-cmake -S examples/pairwise -B external-build -DCMAKE_PREFIX_PATH="$PWD/install"
-cmake --build external-build -j 4
+cmake --preset testing
+cmake --build --preset testing --parallel 4
+ctest --preset testing --output-on-failure --no-tests=error
 ```
 
-Consumers use `find_package(RaMAGPairwise CONFIG REQUIRED)` and link
-`RaMAG::pairwise`. Sequence/index inputs are read-only shared data, workspaces
-belong to each call and returned records own their storage. Existing high-level
-alignment functions remain. Removed manifest, SHA-256 and SeqPro headers are a
-source-compatibility change; use `ReadFasta`, returned `RunStatistics` and optional
-logging instead.
+Python 3 drives small artificial-input CLI and format tests. They validate
+reference/query coordinates, actual CIGAR pairs, score/consumption consistency,
+index persistence, gzip, cancellation, rollback and installed library consumers.
+They do not download genomes or measure real-data accuracy. CI tests Release
+builds with the centromere backend on and off, and treats zero registered tests
+as an error. Internal research tests, when present, are registered separately.
 
-Internal tests cover independent seed/DP oracles, adapter differential behavior,
-ownership paths, public entry-point equivalence, OpenMP and dependency contracts,
-all five serializers, input/persistence/logging failure paths and signal rollback.
-Release/Werror and ASan/UBSan are validated separately. A non-PIE sanitizer build
-is used on the server to avoid the previously observed startup/ASLR issue; this
-does not imply sanitizer coverage of an uninstrumented third-party binary.
-Public release builds remain supported without internal tests or planning files.
-Runtime performance and biological accuracy require separately frozen evidence.
+For memory checks, use a separate build with
+`-DRAMAG_ENABLE_SANITIZERS=ON` and run the relevant small tests. Do not reuse a
+production cache containing retired experimental options.
 
-## Experimental low-overhead coverage controls
+## Behavioral contracts
 
-Production defaults remain unchanged. Independent internal options
-`RAMAG_INTERNAL_STRAND_AWARE_MERGE`,
-`RAMAG_INTERNAL_STRAND_AWARE_DIAGONAL`, and
-`RAMAG_INTERNAL_HALF_OPEN_CHAINING` test checked oriented-query geometry.
-They do not introduce a MEM search. The existing alternative-chain option
-rejects a residual seed set before allocating a second chain when its total
-seed-length upper bound is below `min_cluster`; otherwise it retains the
-original DP, scoring, and extension.
+Preserve sequence ownership and stable indices during seed/candidate processing.
+Returned records own their CIGAR storage. Validate reference and query consumption,
+original-forward half-open coordinates and reverse orientation before publishing.
+Do not merge a failed gap using an invented I+D patch.
 
-`RAMAG_INTERNAL_GAP_FILL=budgeted-ksw2-gap-v1` is an optional experimental
-post-selection policy. Reliable, non-recursive flanks and both-axis occupancy
-checks are shared with guarded gap filling. Canonical exact gaps of 1–10,000
-bases require no DP budget. Nonexact gaps are limited to 1–1,000 bases on each
-axis. Each reserves `3 * (r + 1) * (q + 1)` grid positions against
-`min(500000000, reference_bases, query_bases)` for the current query file.
-The factor three bounds global KSW2 attempts in the current implementation;
-it does not bound wall time or machine instructions.
+Preserve scoring, tie ordering, selection, exact-match semantics and the existing
+resource limits during refactoring. The genome affine score and centromere
+three-piece score are distinct. Unknown bases are never exact anchors. Copy
+branches, unknown directions and unresolved gaps must remain explicit.
 
-Reservation precedes execution in deterministic order (flank identity,
-estimated work, coordinates, and stable parent IDs). Oversized jobs are counted
-and skipped; later smaller jobs remain eligible. Reservations are not refunded.
-At most 64 proposal slots are processed per batch under the existing thread
-budget. Short residual fragments and new fill records are not new flanks.
-The public core uses `GapFillMode::BudgetedKsw2GapV1`; a host may reduce
-`gap_fill_work_budget`, but cannot raise the frozen 500,000,000 cap. Logs
-distinguish budget/length skips, reserved work, and actual KSW2 calls.
-These policies do not promise improved quality or performance before validation.
+For retained behavior, compare ordered output records and independently expanded
+coordinate pairs, not only total coverage or record count. Command-path provenance
+may differ; source offsets, directions and CIGAR may not be silently discarded.
+Time budgets can affect a computation, so report any budget-sensitive difference
+instead of widening the budget to force a test to pass.
+
+## Logs and execution
+
+Each command writes a run log under its work directory. `--print-effective-config`
+prints `key=value` text and exits without alignment. It is not a JSON API.
+Stage capacities and RSS observations have different scopes and must not be added
+together as a process peak. `--threads` is a worker budget, not a memory cap.
+
+SIGUSR1 requests progress on POSIX systems; SIGINT/SIGTERM request cooperative
+cancellation. Existing outputs and independently completed saved indexes remain
+protected. A forced kill is outside the handled rollback guarantee. There is no
+alignment-resume interface.
+
+## Troubleshooting and contributions
+
+Start with [installation](installation.md), then check input validity, supported
+formats, fresh output paths, pinned dependency state and the full run log.
+A genome-only binary cannot run `align -c`. BED mixed alignment is not supported.
+When reporting a problem, include the version, exact command, OS/compiler,
+relevant log and a small reproducible input if shareable. Remove private paths
+and sequence data before posting. See [CONTRIBUTING](../CONTRIBUTING.md).
+
+## Prepare a product source candidate
+
+`public-source-files.txt` is the explicit export list. New files need to be
+classified before inclusion. The export helper copies those files to a new
+directory and writes a sibling SHA-256 manifest:
+
+```bash
+python3 scripts/prepare_public_source.py --output /path/to/new-candidate
+```
+
+It never rewrites versions, updates Git branches, commits or pushes. Internal
+tests, experiment reports, benchmark harnesses, plans and local dependency
+checkouts are excluded. A candidate must independently configure, build, test
+and install using only its own contents before publication. Public headers and
+CMake source/include/install paths must all be represented in the export list.

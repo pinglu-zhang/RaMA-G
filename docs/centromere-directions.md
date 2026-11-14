@@ -1,71 +1,24 @@
-# Experimental direction-region API
+# Centromere direction evidence
 
-The default `align -c` workflow predicts directions and aligns supported paths. See the [centromere CLI](centromere-interface.md).
-Automatic direction-region planning is an opt-in library capability. It is not
-an inversion caller or complete base-pair alignment, and it does not resolve
-which reference repeat copy corresponds to every inferred query interval.
+The complete `align -c` workflow predicts direction from input sequence evidence.
+Its V9 planner combines initial forward/reverse anchors, local direction support,
+reference-placement checks, neighboring context and the retained protection rules.
+A direction label is not sufficient evidence for a unique reference copy.
 
-Use `find_package(RaMAGCentromere CONFIG REQUIRED)` and link `RaMAG::centromere`.
-The header `<ramag/centromere_blocks.hpp>` provides `CentromereBlockOptions`,
-`FindCentromereDirectionRegions` and the direction evidence writers.
+Unknown or competing evidence can remain unresolved. Current gap, placement,
+opposition, island and protection rules run in their defined order. Grouping their
+implementation by function does not merge their acceptance criteria into one vote.
+The planner uses input FASTA and its own search evidence; it does not consume
+simulation truth or downstream benchmark scores.
 
-## Selecting the local direction repair policy
+Reverse searches use canonical reverse-complement coordinates internally. Output
+query coordinates always refer to the original forward FASTA. All diagnostic
+intervals are zero-based and half-open. Known directions constrain the recursive
+anchor stage; later reviews update corresponding initial/final tables through the
+coordinated replacement operations.
 
-Set `planning_strategy` to `CentromereBlockStrategy::OrientationEvidenceV9`.
-For the full local direction repair pipeline, enable the following option fields:
-
-```text
-orientation_connected_gaps
-orientation_bridge_unknown_gaps
-orientation_audit_known_blocks
-recover_long_gap_ends
-recover_sparse_pivots
-recover_short_gap_ends
-recover_mixed_gap_ends
-recover_sparse_gap_ends
-prefer_stronger_sparse_gap_end
-unify_real_anchor_ends
-review_local_competitive_gaps
-review_isolated_opposite_anchors
-review_collinear_fragment_connections
-review_collinear_window_gaps
-review_alternate_original_endpoints
-review_neutral_window_gaps
-review_region_chains
-supplement_region_anchors
-review_unified_gaps
-review_gap_interior_opposition
-review_known_block_counterchains
-repair_inherited_directions
-```
-
-`repair_drift_consistent_gaps=false` selects the v1 final repair;
-`repair_drift_consistent_gaps=true` additionally enables the v2 long-edge rule.
-These flags default to false. Invalid prerequisite combinations raise an error.
-Configure `worker_threads`, memory limits and search bounds for the workload;
-the public defaults are not a claim of benchmark-equivalent performance.
-
-The CMake equivalent of the v2 flag is
-`RAMAG_CENTROMERE_REPAIR_DRIFT_CONSISTENT_GAPS`, also OFF by default. CMake
-configuration validates the required preceding options. These settings do not
-select the direction-only diagnostic route by themselves.
-
-## Results and interpretation
-
-`local_direction_repair_intervals` is the complete final known-direction set.
-`orientation_unknown` records the remaining unknown query intervals. Do not
-union final intervals with older intermediate direction tables a second time.
-Reviews, witnesses and changes preserve the frozen evidence and decision origin;
-changes describe the pre-repair-to-final transition, not arbitrary version deltas.
-Coordinates are zero-based, half-open, in the original query orientation.
-
-Both repair policies make one final pass over frozen evidence; repaired output
-never becomes new evidence. The final repair stage adds no searches and invokes
-no WFA. Earlier enabled stages can perform their configured bounded searches.
-For long-edge admission, source reference/query counts of 1/1 describe LCP
-source-interval counts, not a proof of global uniqueness in either sequence.
-Direction inference does not claim exact matching across inferred gaps.
-
-See [input contract](centromere-interface.md) and
-[source integration](centromere-rama-integration.md) for input normalization,
-thread ownership and the separately retained complete alignment API.
+The program preserves direction evidence and planned-region TSVs as diagnostics.
+Use the effective configuration and run log to identify the current workflow.
+Coverage is not a homology accuracy score, and historical inversion events are not
+an input to direction prediction. See [directed anchors](centromere-directed-anchors.md)
+and [format contracts](centromere-alignment-formats.md).

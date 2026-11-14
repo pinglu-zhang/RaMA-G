@@ -6,40 +6,10 @@ TSVs. See the [centromere interface](centromere-interface.md).
 
 ## Purpose and installation
 
-RaMA-G performs assembly-to-assembly nucleotide alignment. The reference is the
-target coordinate system; the query is aligned in both orientations. It is not a
-short-read mapper. Linux x86-64, a C++20 compiler, CMake 3.22+, Git, zlib and C/C++
-OpenMP are the production build requirements.
-
-These instructions cover the pending 0.1.1 source version. Run the following
-commands from the source root, using a fresh build directory after upgrading:
-
-```bash
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
-  -DRAMAG_WARNINGS_AS_ERRORS=ON
-cmake --build build-release -j 8
-./build-release/ramag --version
-./build-release/ramag --help
-ctest --test-dir build-release --output-on-failure
-```
-
-The project version supplies the CLI version, SAM `@PG VN` and installed CMake
-package version. To install the program and library under a local prefix:
-
-```bash
-cmake --install build-release --prefix "$PWD/install"
-./install/bin/ramag --version
-```
-
-Examples below use `ramag`; use the executable's full path or add its installed
-`bin` directory to your `PATH`. See the [changelog](../CHANGELOG.md) for changes.
-
-Internal checkouts contain tests; public release trees need not. CTest verifies
-only tests available in the selected checkout. Absence of tests does not prevent
-building the program. Sufkit is fixed to
-`028075e6f2d622fcbdcf76b153bbde0f069ca64f`; a local override must have that exact
-HEAD and a clean worktree. Disable pinned dependencies only for internal oracle
-development. RaMA-G no longer depends directly on SeqPro.
+RaMA-G performs assembly-to-assembly nucleotide alignment, not short-read mapping.
+See [installation](installation.md) for the supported Linux toolchain, fixed
+Sufkit/WFA2 dependencies, full and genome-only builds, and public tests. Start with
+[artificial examples](quick-start.md) before supplying a large assembly.
 
 ## FASTA inputs
 
@@ -72,7 +42,7 @@ whitespace because delta's first line separates the two paths with whitespace.
 Create or supply `reference.fa` and `query.fa` before running these examples:
 
 ```bash
-# Legacy interface: defaults to SAM, PAF and delta.
+# Prefix-driven selection: defaults to SAM, PAF and delta.
 ramag align --reference reference.fa --query query.fa \
   --output-prefix result --work-dir work
 
@@ -120,15 +90,6 @@ RaMA-G also compares stored contig metadata and Sufkit's reference fingerprint
 with the supplied normalized reference. SHA-256 is no longer calculated; CRC and
 the existing Sufkit fingerprint checks remain. A mismatch fails without rebuild.
 
-`--threads` also supplies the index-loading worker budget for SA/ISA consistency
-validation and Fast prefix-directory construction. On Linux, the requested
-budget must fit the calling thread's allowed CPU set; check your scheduler or
-`taskset` allocation if loading reports insufficient allowed CPUs. Not every
-loading phase is parallel, and this option does not promise linear speedup.
-CRC is accumulated while sections are read, and the normalized reference is
-checked through read-only views. Full validation is retained. Upgrading to 0.1.1
-does not require rebuilding compatible old raw- or byte-coded-LCP indexes.
-
 `--save` and `--reference-index` are mutually exclusive. Saving uses the same
 in-memory object, then self-validates and atomically publishes it. An index that
 was successfully saved is retained if later alignment fails. Without `--save`,
@@ -154,8 +115,8 @@ The seqfile is a plain-text file with one query name and FASTA path per line,
 separated by whitespace. `.txt` is the recommended suffix, but parsing does not
 depend on the filename suffix.
 
-An editable [seqfile example](../examples/batch/queries.txt) is included; replace
-its placeholder paths with your query FASTAs.
+A runnable artificial [seqfile example](../examples/batch/queries.txt) is included.
+For your assemblies, replace the paths with your own query FASTAs.
 
 ```text
 # name      FASTA path
@@ -279,7 +240,8 @@ The selection is not equivalent to MUMmer4 `delta-filter -1`.
 
 The `batch` candidate-output workflow, `align -c` centromere workflow and
 library defaults retain their existing semantics. Library callers can still
-select candidate, unlinked, linked and recovery modes through `AlignmentOptions`.
+select candidate, unlinked and linked modes through `AlignmentOptions`. Optional
+recovery experiments are retired; see [migration](migration.md).
 See [main-path linking](mainpath-linking.md) for coordinates and gap limits.
 
 ## Alignment options
@@ -298,8 +260,8 @@ See [main-path linking](mainpath-linking.md) for coordinates and gap limits.
 KSW2 uses the current pairwise scoring, certified global bandwidth expansion and
 endpoint extension. CLI parameters do not select an alternate DP backend.
 Use the same command with `--print-effective-config` to inspect its configuration
-without running alignment. This JSON printed to stdout remains supported; it is
-not a runtime manifest. No log is created for help, version or effective config.
+without running alignment. The output is `key=value` text, not JSON and not a
+runtime manifest. No log is created for help, version or effective config.
 
 ## Formats and coordinate interpretation
 
@@ -326,12 +288,6 @@ configuration, input counts, index action/encoding, stage timings, core statisti
 requested artifacts and final status/exit code. Logs are flushed on exit and
 retained after failure. Failure before a logger can be created is reported to
 stderr. There are no SHA-256 digests, runtime manifests or completion markers.
-
-For reused indexes, logs include `index_action=loaded`, the requested loading
-thread budget, LCP encoding, logical read bytes and CRC CPU time. Timing summaries
-separate the Sufkit load, reference validation and detailed loading phases.
-CRC computation is included in section-read times; do not add it again to the
-load total or interpret CPU seconds as elapsed wall time.
 
 `--progress auto` shows terminal progress only when stderr is a TTY. `on` forces
 periodic progress; `off` suppresses it. The default interval is 10 seconds; an

@@ -41,19 +41,11 @@ enum class AlignmentSelection : std::uint8_t {
 };
 
 enum class LinkGapMode : std::uint8_t { None, Bounded };
-// Retired experimental modes used values 2 and 4. Keep retained values stable.
-enum class LinkRecoveryMode : std::uint8_t {
-    None = 0,
-    VacantChains = 1,
-    ChainRecover = 3,
-};
-
 struct AlignmentOptions {
     SeedMode seed_mode{SeedMode::FastHierarchical};
     AlignmentSelection selection{AlignmentSelection::All};
     // Used only by LinkedOneToOne; library and batch defaults stay All.
     LinkGapMode link_gap_mode{LinkGapMode::Bounded};
-    LinkRecoveryMode link_recovery_mode{LinkRecoveryMode::None};
     Length min_match{20};
     std::uint64_t smem_min_occurrences{1};
     Length max_gap{90};

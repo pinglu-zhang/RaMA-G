@@ -2,28 +2,23 @@
 
 ## Unreleased changes
 
-- Make ordinary `ramag align` select a bilateral one-to-one main path and link
-  compatible records with bounded gap filling. Additional recovery is disabled.
-- Remove the `--selection-mode`, `--link-gap-mode` and `--link-recovery-mode`
-  switches. Existing command lines must omit them. The ordinary default now
-  matches the preceding explicit linked/bounded/no-recovery workflow instead
-  of full candidate output. Batch, centromere and library defaults are unchanged.
-- Add main-path linking, bounded vacant/chain recovery library interfaces and
-  shared cumulative recovery budgets; install their public budget header.
 
-- Add the source-derived RaMA centromere backend, anchor-only CLI export,
-  installed centromere library, and opt-in direction-region planning and repair.
-  Experimental direction options remain disabled by default.
-- Support strict genome-only builds with the centromere backend disabled;
-  unavailable centromere APIs report a dependency error.
+### Product organization and interface cleanup
 
-- Add `ramag batch` with repeated query paths or a named seqfile, one shared
-  reference/index initialization, serial queries, PAF by default and per-query
-  transactional output. Ordinary query failures do not prevent later queries;
-  `batch.tsv` records terminal outcomes and the overall exit code is nonzero
-  when any query fails. The resident index may increase pairwise-stage memory.
-- Add batch effective configuration, query-aware progress and separate shared
-  initialization timing. No batch performance claim or version bump is included.
+- Provide English installation and quick-start guides, artificial runnable
+  examples, standard build presets and public synthetic tests with Linux CI.
+- Organize production sources by responsibility and retire old coverage build
+  variants, fragment/one-sided re-selection and optional vacant/chain recovery.
+  These experimental library interfaces are removed; consumers must recompile.
+- Keep ordinary `align` on linked bilateral main paths with bounded gaps and no
+  additional recovery. Batch retains candidate output; `align -c` retains the
+  complete predicted-direction, recursive/copy-anchor, reviewed-path workflow.
+- Remove the top-level benchmark harness from the product tree. Historical
+  research source and results remain separately preserved.
+- Keep retained scoring, coordinates, thresholds and resource limits unchanged.
+
+See [migration](docs/migration.md) for removed options and APIs. These changes do
+not create a new tagged release or claim a performance or accuracy improvement.
 
 ## 0.1.1 — Unreleased
 
