@@ -1,123 +1,88 @@
 # Installation
 
-## Supported production configuration
+## Requirements
 
-RaMA-G currently targets Linux x86-64. The CPU must support SSE4.2, which is used
-by the pinned Sufkit dependency. Use a compiler supporting C++20 and C11, CMake
-3.22 or newer, Git, zlib development files, C/C++ OpenMP, and Make or Ninja.
-The pthread and math libraries are supplied by the system toolchain.
+RaMA-G supports Linux x86-64 with SSE4.2. Use a C++20/C11 compiler, CMake 3.22 or
+newer, Git, zlib development files, C/C++ OpenMP, and Make or Ninja.
 
-For Ubuntu 24.04:
+On Ubuntu 24.04:
 
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential cmake git zlib1g-dev
 ```
 
-Python 3 is needed only for public tests and the optional diagnostic script.
-Samtools is an optional independent SAM validator. Rust, Cargo, Doxygen and
-MUMmer4 are not production dependencies. No Conda or pip distribution is provided.
+Python 3 is needed only for optional synthetic installation tests. Samtools can
+provide an additional SAM format check. Neither is a core runtime dependency.
+Rust, Cargo and a separate Centrolign executable are not required.
 
-## Build from source
+## Build
 
 ```bash
-git clone https://github.com/pinglu-zhang/RaMA-G.git
+git clone --depth 1 https://github.com/pinglu-zhang/RaMA-G.git
 cd RaMA-G
 cmake --preset release
 cmake --build --preset release --parallel 4
 ./build/release/ramag --version
-./build/release/ramag --help
+./build/release/ramag align --help
 ```
 
-The `release` preset builds the complete Linux program without test-only tools.
-Its explicit equivalent is:
+Initial configuration fetches exact Sufkit and WFA2 Git revisions. Other required
+source components are bundled. The default Release preset does not build tests.
 
-```bash
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release   -DBUILD_TESTING=OFF -DRAMAG_BUILD_TESTS=OFF
-cmake --build build/release --parallel 4
-```
-
-`genome-only` uses a separate build directory and disables the centromere backend:
+For whole-genome alignment without the centromere backend:
 
 ```bash
 cmake --preset genome-only
 cmake --build --preset genome-only --parallel 4
 ```
 
-A genome-only binary supports genome `align`, `index` and `batch`. A centromere
-request reports an unavailable dependency; it never falls back to genome mode.
+Genome-only supports `align`, `index` and `batch`. It still requires Sufkit;
+`align -c` reports an unavailable backend. Use a separate build directory for
+each configuration. No Conda, pip or prebuilt binary distribution is provided.
 
-## Pinned dependencies and offline configuration
-
-Initial configuration fetches exact Sufkit and WFA2 Git revisions over HTTPS.
-KSW2, RaMA-derived code, the minimal Centrolign stitching kernels, kseq and spdlog
-are already included. Genome-only omits WFA2, but still needs Sufkit.
-
-For offline use, prepare clean Git checkouts of the exact revisions recorded in
-`CMakeLists.txt` and the dependency CMake modules, including their required source
-files. Supply absolute paths:
-
-```bash
-cmake \
-  -S . \
-  -B build/offline \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TESTING=OFF \
-  -DRAMAG_BUILD_TESTS=OFF \
-  -DRAMAG_SUFKIT_SOURCE_DIR=/path/to/clean/pinned/sufkit \
-  -DRAMAG_WFA2_SOURCE_DIR=/path/to/clean/pinned/WFA2-lib
-cmake --build build/offline --parallel 4
-```
-
-An arbitrary source ZIP is not equivalent to a clean pinned Git checkout.
-Do not change dependency commits to bypass validation. Disabling production
-adapters is not an offline installation method.
-
-## Install and verify
+## Install
 
 ```bash
 cmake --install build/release --prefix "$HOME/.local"
 "$HOME/.local/bin/ramag" --version
 ```
 
-Add the prefix's `bin` directory to your shell PATH if desired. Installation also
-provides the `RaMAGPairwise` and `RaMAGCentromere` CMake packages. See the
-[library guide](library.md) for isolated consumer examples.
+Add `$HOME/.local/bin` to your PATH to invoke `ramag` directly. License materials
+are installed under `share/ramag`; retained C++ packages and public headers are
+also installed. When replacing an older installation, use a clean prefix to
+avoid retaining obsolete files from that installation.
 
-## Test a build
+## Offline configuration
+
+Prepare clean Git checkouts of Sufkit at
+`028075e6f2d622fcbdcf76b153bbde0f069ca64f` and WFA2 at
+`99a5879a3a2972eff168cbcc6610b6cf02844ed0`. Supply their absolute paths:
 
 ```bash
-sudo apt-get install python3
+cmake -S . -B build/offline -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF -DRAMAG_BUILD_TESTS=OFF \
+  -DRAMAG_SUFKIT_SOURCE_DIR=/path/to/clean/pinned/sufkit \
+  -DRAMAG_WFA2_SOURCE_DIR=/path/to/clean/pinned/WFA2-lib
+cmake --build build/offline --parallel 4
+```
+
+A source ZIP or an arbitrary dependency revision is not a compatible override.
+The dependency checkouts must have the exact commits and no uncommitted files.
+For an offline genome-only build, add `-DRAMAG_ENABLE_CENTROMERE=OFF`; WFA2 is
+then unnecessary. Disabling Sufkit is not an offline installation method.
+
+## Verify an installation
+
+Run the [first alignment](../README.md#first-alignment) with the supplied
+artificial FASTA files. Check exit status zero and the resulting PAF.
+Optional synthetic tests require Python 3:
+
+```bash
 cmake --preset testing
 cmake --build --preset testing --parallel 4
 ctest --preset testing --output-on-failure --no-tests=error
 ```
 
-These tests use artificial sequences and require no benchmark downloads. A zero
-registered-test count is an error. Backend-OFF testing uses a separate directory:
-
-```bash
-cmake \
-  -S . \
-  -B build/testing-genome \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TESTING=ON \
-  -DRAMAG_BUILD_TESTS=ON \
-  -DRAMAG_WARNINGS_AS_ERRORS=ON \
-  -DRAMAG_ENABLE_CENTROMERE=OFF
-cmake --build build/testing-genome --parallel 4
-ctest --test-dir build/testing-genome --output-on-failure --no-tests=error
-```
-
-## Troubleshooting
-
-- **OpenMP or zlib not found:** install compiler and development packages, then
-  configure a new build directory.
-- **Dependency revision/dirty checkout error:** restore the required dependency
-  revision and clean its tracked changes; do not disable validation.
-- **Old experimental cache rejected:** create a fresh directory and use a current
-  preset. Retired configuration names are listed in [migration](migration.md).
-- **Illegal instruction:** check CPU support for SSE4.2.
-- **Output already exists:** use a new output prefix; RaMA-G does not overwrite.
-- **Large memory use:** reference indexing, query sequences and candidates consume
-  memory. `--threads` controls workers, not a whole-program memory cap.
+These tests use no real genomes or benchmark downloads. See
+[troubleshooting](troubleshooting.md) if a build, dependency check or run fails.

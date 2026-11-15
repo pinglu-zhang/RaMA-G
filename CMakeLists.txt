@@ -211,12 +211,22 @@ target_include_directories(ramag PRIVATE "${PROJECT_SOURCE_DIR}/include")
 ramag_apply_project_warnings(ramag)
 
 install(TARGETS ramag RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag")
+install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag")
+if(RAMAG_ENABLE_PINNED_DEPENDENCIES)
+  install(FILES "${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}/LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag/third_party/sufkit")
+  foreach(_license_component IN ITEMS parlaylib kseq caps-sa libdivsufsort sdsl)
+    install(FILES "${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}/third_party/${_license_component}/LICENSE"
+      DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag/third_party/sufkit/${_license_component}")
+    if(EXISTS "${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}/third_party/${_license_component}/AUTHORS")
+      install(FILES "${RAMAG_RESOLVED_SUFKIT_SOURCE_DIR}/third_party/${_license_component}/AUTHORS"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/ramag/third_party/sufkit/${_license_component}")
+    endif()
+  endforeach()
+endif()
+
 
 if(BUILD_TESTING AND RAMAG_BUILD_TESTS)
-  # Public synthetic checks must not depend on internal fixture availability.
+  # Small synthetic checks require no research fixtures.
   add_subdirectory(tests/public)
-  if(EXISTS "${PROJECT_SOURCE_DIR}/cmake/RaMAInternalTests.cmake")
-    include(cmake/RaMAInternalTests.cmake)
-  endif()
 endif()

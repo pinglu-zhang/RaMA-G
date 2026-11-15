@@ -1,5 +1,5 @@
 // Modified for RaMA-G: library ownership/safety and deterministic N adaptation.
-// Original algorithm rules and detailed changes: docs/centromere-rama-integration.md.
+// Original algorithm rules and detailed changes: LICENSE.
 // vim: noai:ts=2:sw=2
 
 /*

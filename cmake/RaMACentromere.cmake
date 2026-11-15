@@ -405,7 +405,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RaMAGCentromereConfig.cmake
 install(FILES include/ramag/centromere.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
 install(FILES include/ramag/centromere/direction.hpp include/ramag/centromere/anchors.hpp
   include/ramag/centromere/stitch.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag/centromere)
-install(FILES third_party/rama/upstream/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/rama)
+install(FILES third_party/rama/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/rama)
 if(RAMAG_ENABLE_CENTROMERE)
   install(FILES "${_wfa}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/wfa2)
   install(FILES "${_stitch_vendor}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/centrolign_stitch)

@@ -1,358 +1,198 @@
-# RaMA-G user guide
+# Commands and parameters
 
-Linux `ramag align -c` aligns one centromere FASTA record per side.
-It predicts directions and produces path-aware SAM, PAF and MAF plus diagnostic
-TSVs. See the [centromere interface](centromere-interface.md).
+Use the [README](../README.md) for runnable artificial examples and
+[installation](installation.md) for build requirements.
 
-## Purpose and installation
+## Choose a command
 
-RaMA-G performs assembly-to-assembly nucleotide alignment, not short-read mapping.
-See [installation](installation.md) for the supported Linux toolchain, fixed
-Sufkit/WFA2 dependencies, full and genome-only builds, and public tests. Start with
-[artificial examples](quick-start.md) before supplying a large assembly.
+| Command | Use |
+|---|---|
+| `align` | Pairwise whole-genome alignment with linked bilateral main-path output |
+| `align -c` | One centromere FASTA record per side, with direction and copy paths |
+| `index` | Save a reusable whole-genome reference index |
+| `batch` | Run queries serially using a shared reference index; retain candidate output |
+
+RaMA-G aligns assemblies, not short reads. Genome and centromere commands have
+different workflows and output defaults. In particular, `batch` is not a repeated
+invocation of ordinary `align` with the same selection policy.
 
 ## FASTA inputs
 
-Reference and query both accept plain and gzip FASTA, including `.fa`, `.fasta`,
-`.fna` and gzip variants. Compression is detected from bytes, not just suffixes.
-A gzip magic header without a gzip suffix is accepted; a gzip-looking suffix
-without valid gzip content fails. BGZF and concatenated gzip members are read
-sequentially. No external decompressor, FAI or `.gzi` file is used or created.
-Existing adjacent FAI files are ignored and left unchanged.
+Both sides accept plain and gzip FASTA, including BGZF and concatenated gzip
+members. Compression is detected from bytes. Damaged gzip or a gzip-looking
+suffix without gzip data is rejected. No external decompressor or FAI/GZI is
+required; existing index companions are ignored.
 
-kseq parses records and zlib reads the stream. The input wrapper rejects FASTQ,
-sequence before the first header, duplicate IDs, empty records, nonletter bases,
-damaged/truncated gzip and unsupported `.bz2`, `.xz`, `.zst` or `.zip` input.
-IDs are the first whitespace-delimited header token; the complete trimmed header
-is retained. Empty lines within records are allowed; a leading blank line is
-rejected. CRLF and LF are accepted. Sequence spaces and digits are rejected.
+Record IDs are the first whitespace-delimited header token and must be unique
+within each input. Empty records, FASTQ, sequence before the first header,
+nonletter sequence characters and unsupported compressed formats are rejected.
+LF and CRLF are supported. Letters are uppercased; non-ACGT letters become `N`.
+`N` and record boundaries break exact seed matching. A single record longer than
+`INT_MAX` bases is rejected; collections may total more than that. Inputs are
+loaded into memory.
 
-Letters become uppercase `A/C/G/T/N`; other letters, including IUPAC ambiguities,
-`U` and `X`, become `N`. `N` is a hard break for seed matching. Record boundaries
-are hard breaks. Total coordinates remain 64-bit; the frozen kseq parser has an
-`int` return length, so a single record longer than `INT_MAX` bases is rejected
-explicitly rather than silently truncated. Multiple records can total more than
-that limit. The input collection is materialized in memory.
+Delta output requires input paths without whitespace. Other validation and
+output-name restrictions are described in [formats](formats.md).
 
-When delta output is requested, reference and query paths cannot contain
-whitespace because delta's first line separates the two paths with whitespace.
-
-## Quick start and output selection
-
-Create or supply `reference.fa` and `query.fa` before running these examples:
+## Ordinary genome alignment
 
 ```bash
-# Prefix-driven selection: defaults to SAM, PAF and delta.
 ramag align --reference reference.fa --query query.fa \
-  --output-prefix result --work-dir work
-
-# Explicit suffix-driven selection.
-ramag align --reference reference.fa.gz --query query.fa.gz \
-  --output result.paf --output result.maf --output result.chain --work-dir work
+  --output result.paf --output result.maf --work-dir work --threads 8
 ```
 
-Explicit outputs must share one directory and base prefix. Each of `.sam`,
-`.paf`, `.delta`, `.maf`, `.chain` can occur once. Unknown suffixes, compressed
-outputs, duplicate paths/formats and mixed `--output` with `--output-prefix` or
-`--formats` fail before alignment. With the legacy interface, `--formats` accepts
-a comma-separated subset of these five formats.
+Ordinary alignment selects a bilateral one-to-one main path and links compatible
+records, including supported bounded gaps. Alternative repeat placements can be
+omitted. The former `--selection-mode`, `--link-gap-mode` and
+`--link-recovery-mode` switches are no longer accepted; remove them from older
+commands. This output policy differs from older all-candidate output.
 
-Output files are never overwritten. Use a new prefix for another run. All
-requested formats are written privately, validated, then published. A handled
-writer/publication failure rolls back this run's published files. Existing files
-owned by another run are preserved. There is no all-files atomic commit after an
-unhandled crash or `SIGKILL`; files alone cannot prove a successful command.
+Use either repeated `--output` or an output prefix:
+
+```bash
+ramag align --reference reference.fa --query query.fa \
+  --output-prefix result --formats sam,paf,maf --work-dir work
+```
+
+Explicit outputs must have the same directory and base prefix, with each
+supported suffix appearing once. Do not mix `--output` with `--output-prefix`
+or `--formats`. Defaults and file meanings are in [formats](formats.md).
+
+## Centromere pairs
+
+```bash
+ramag align -c --reference reference.fa --query query.fa \
+  --output-prefix centromere --threads 1
+```
+
+Each FASTA must contain exactly one record. The command predicts directions,
+finds recursive and accepted-copy anchors, reviews paths and aligns supported
+internal gaps. It writes SAM, PAF, MAF and diagnostic TSVs by default. Restrict
+standard formats with `--formats paf`, or request explicit `.paf`, `.sam` and
+`.maf` files with repeated `--output`.
+
+Unknown directions, ambiguous copy choices, tails and unresolved gaps can remain
+unaligned. Read the summary/gap TSVs alongside the standard output. A completed
+run does not mean that every input base has a homologous partner or is aligned.
+See [formats](formats.md) for copy/path metadata.
+
+When omitted, the centromere work directory is `.ramag-work` beside the output.
+Genome seed/tuning and persistent-index options cannot be combined with `-c`.
+A genome-only build cannot run this command. BED-based mixed genome/centromere
+alignment is not implemented: `--ref-cen` and `--query-cen` can be inspected with
+`--print-effective-config`, but do not provide a runnable mixed-alignment mode.
 
 ## Persistent reference indexes
 
+Build an index and reuse it:
+
 ```bash
-# Build in memory, save that same index, then align.
-ramag align --reference reference.fa --query query.fa \
-  --save reference.sufidx --output saved-result.paf --work-dir save-work
-
-# Build only an index.
-ramag index --reference reference.fa.gz --output other-reference.sufidx \
+ramag index --reference reference.fa.gz --output reference.sufidx \
   --work-dir index-work --threads 8
-
-# Load an existing index without rebuilding it.
-ramag align --reference reference.fa --reference-index reference.sufidx \
-  --query another-query.fa --output another-result.paf --work-dir another-work
+ramag align --reference reference.fa.gz --reference-index reference.sufidx \
+  --query query.fa --output result.paf --work-dir align-work --threads 8
 ```
 
-The persistent artifact is a single `.sufidx`. No companion manifest or marker
-is required. Old raw-LCP and compressed-LCP indexes remain loadable if Sufkit
-accepts their format and capabilities; any historical companions are ignored.
-New indexes default to byte-coded LCP, with full SA, ISA and suffix links.
+Alternatively, add `--save reference.sufidx` to a genome `align` or `batch` command
+to save its newly built index. `--save` and `--reference-index` are mutually
+exclusive. Index files and outputs are never overwritten.
 
-The reference FASTA remains required to provide bases for extension and output.
-Sufkit checks section CRC, suffix-array structure and resource capabilities.
-RaMA-G also compares stored contig metadata and Sufkit's reference fingerprint
-with the supplied normalized reference. SHA-256 is no longer calculated; CRC and
-the existing Sufkit fingerprint checks remain. A mismatch fails without rebuild.
-
-`--save` and `--reference-index` are mutually exclusive. Saving uses the same
-in-memory object, then self-validates and atomically publishes it. An index that
-was successfully saved is retained if later alignment fails. Without `--save`,
-there is no persistent index Save or save/load self-validation. RaMA-G neither
-discovers indexes automatically nor silently converts loaded LCP encodings.
+The reference FASTA is still required and must match the indexed normalized
+reference. A mismatch or corrupt index fails rather than silently rebuilding.
+The index is one `.sufidx` file. There is no automatic index discovery and no
+required companion manifest. Compatible older indexes remain loadable; unrelated
+old companion files are left untouched. A successfully saved index survives a
+later alignment failure.
 
 ## Batch queries
 
-`batch` reads one reference and initializes one shared Sufkit index, then processes
-query FASTAs in input order. Each query remains an independent alignment, including
-its FASTA record boundaries and strict-MUM uniqueness rules.
-
 ```bash
-ramag batch --reference human.fa.gz --reference-index human.sufidx \
-  --query chimp.fa.gz --query gorilla.fa.gz --query orangutan.fa.gz \
-  --output-dir results --threads 32
-
-ramag batch --reference human.fa.gz --reference-index human.sufidx \
-  --seqfile queries.txt --output-dir named-results --threads 32
+ramag batch --reference reference.fa --reference-index reference.sufidx \
+  --seqfile queries.txt --output-dir results --threads 8
 ```
 
-The seqfile is a plain-text file with one query name and FASTA path per line,
-separated by whitespace. `.txt` is the recommended suffix, but parsing does not
-depend on the filename suffix.
-
-A runnable artificial [seqfile example](../examples/batch/queries.txt) is included.
-For your assemblies, replace the paths with your own query FASTAs.
+A seqfile has one name and FASTA path per line:
 
 ```text
-# name      FASTA path
-chimp       data/chimp.fa.gz
-gorilla     data/gorilla.fa.gz
-orangutan   data/orangutan.fa.gz
+query1  data/query1.fa.gz
+query2  data/query2.fa.gz
 ```
 
-Paths are relative to the seqfile directory, not the process working directory.
-The first whitespace separator ends the name; the remaining trimmed text is the
-path and may contain internal spaces. LF, CRLF, blank lines and whole-line `#`
-comments are supported. Shell variables, glob patterns and quoting are not
-expanded. This is a query list, not a Cactus tree/seqfile. The reference is supplied
-separately with `--reference`. `--seqfile` and repeated `--query` cannot be mixed.
+Paths are relative to the seqfile directory. After the first whitespace
+separator, the remaining trimmed text is the path; internal spaces are allowed.
+Blank lines and whole-line `#` comments are supported. Shell variables, globs
+and quoting are not expanded. Names must be unique and use letters, digits,
+`.`, `_` or `-`; empty names and reserved path/table names are rejected.
+The [supplied seqfile](../examples/batch/queries.txt) is a runnable example.
 
-Names may use ASCII letters, digits, `.`, `_` and `-`, and must be unique. Empty
-names, `.`, `..`, `batch.tsv` and `.ramag-work` are rejected. With repeated
-`--query`, names come from the filename after stripping `.gz` and `.fa`, `.fna`
-or `.fasta`. If filenames collide or contain unsupported name characters, use
-unique explicit names in a seqfile. Missing/unreadable query files are individual
-failures; malformed seqfiles and duplicate names fail before index initialization.
+Repeated `--query PATH` is an alternative to `--seqfile`; do not combine them.
+Names then come from query filenames. If filenames collide, use a named seqfile.
+`--output-dir` is required. The default work directory is `OUTPUT_DIR/.ramag-work`.
+Each query writes `OUTPUT_DIR/NAME/alignment.paf` by default; `--formats` selects
+other genome formats. `--output` and `--output-prefix` are not batch options.
 
-Each item writes `OUTPUT_DIR/NAME/alignment.paf` by default. `--formats` accepts
-the same five formats as `align`. Seed, scoring and thread defaults also match
-`align` (including `fast`). Batch retains its existing `all` candidate-output
-policy; ordinary `align` automatically selects and links a bilateral main path.
-The three former selection/linking/recovery CLI switches are no longer accepted. Batch
-does not accept `--output` or `--output-prefix`. The output directory is required;
-the optional `--work-dir` defaults to `OUTPUT_DIR/.ramag-work`.
+One reference/index stays resident while queries run serially. Missing or invalid
+query inputs are recorded and later queries continue. Initialization errors or
+interruption stop the batch. Successfully completed outputs remain available.
+There is no query concurrency, prefetch or batch resume. A batch can retain more
+memory than standalone alignment because its reference index stays resident.
 
-Without `--reference-index`, batch builds one ephemeral byte-coded-LCP index.
-Use `--save PATH` to save that same object before processing queries; saving also
-performs the usual temporary-file Load self-validation. `--save` and
-`--reference-index` are mutually exclusive. A saved index survives later query
-failure. Compatible old raw/byte-coded indexes remain usable.
+`batch.tsv` reports order, name, query path, status, exit code, elapsed time,
+alignment record count, output directory, log path and message. Status is
+`success`, `failed`, `interrupted` or `not-run`. A currently running query has
+no terminal row yet. The table is flushed per finished query. Per-query elapsed
+time excludes shared initialization. Tabs/newlines/backslashes are escaped.
+Exit zero means all queries succeeded; otherwise the first failed query's code
+is returned, or 130/143 for interruption. Existing outputs/tables are protected.
 
-Queries run serially, each using the requested thread budget. Only one query's
-sequence, seeds and alignment workspace are retained at a time, but the reference
-and index stay resident until batch ends. Standalone `align` releases its index
-after enumeration; batch can therefore have a higher pairwise-stage memory peak.
-There is no automatic query prefetch, parallel-query execution or resume.
-The existing bounded per-thread encoding/selection scratch caches may be reused;
-batch does not retain prior query records, seeds or alignment results.
-The reference is held by an immutable shared owner and checked once during
-index initialization. Later queries reuse that validated binding without
-rescanning or copying the reference. Query input is still validated independently.
-On glibc, batch returns freed allocator pages between queries. This does not
-discard live index pages or impose an RSS cap. The extra resident index during
-pairwise processing means that a strict standalone-align peak-memory bound is
-not guaranteed. No whole-batch thread pool or memory-admission scheduler is used;
-OpenMP parallelism remains within the current query. The experimental
-`--query-concurrency` and `--memory-budget` options are not supported.
+## Parameters
 
-`OUTPUT_DIR/batch.tsv` is created exclusively and flushed after each terminal
-query outcome. Columns are `order`, `name`, `query_path`, `status`, `exit_code`,
-`elapsed_seconds`, `alignment_records`, `output_dir`, `log_path`, and `message`.
-Tabs, newlines, carriage returns and backslashes inside field values are escaped
-as `\t`, `\n`, `\r` and `\\`. Per-query elapsed time excludes shared initialization.
-It is a status table, not a completion marker; while a query runs its terminal
-row is absent. An abrupt process kill may leave only the completed rows.
-
-Statuses are `success`, `failed`, `interrupted` and `not-run`. Valid zero-hit
-outputs are successful with zero records. On early termination, remaining rows
-are appended as `not-run` with an empty exit-code field. All successful query
-outputs are preserved; handled failures roll back only the current item's files.
-Existing output files and an existing `batch.tsv` are never overwritten, and
-all planned output collisions are checked before initialization.
-
-The batch exits 0 only if all queries succeed. Ordinary failures are recorded
-and later queries continue; the final exit code is that of the first failed
-query in input order. Shared initialization errors, allocation failure or an
-unreliable batch status table stop the batch. SIGINT/SIGTERM stop scheduling,
-roll back the interrupted item and exit 130/143. SIGUSR1 requests a snapshot
-containing the current query name, position and processing phase.
-
-The batch log records shared reference input and index initialization separately
-from query execution. `index_load_calls` and `index_build_calls` count shared
-initialization calls, not the Load self-check used when saving. Each query logs
-`index_action=reused` with zero initialization calls. Per-query logs live below
-`WORK/queries/NAME/runs/RUN_ID/run.log`. A command with
-`--print-effective-config` prints the resolved list and paths without reading
-FASTA contents or initializing an index.
-
-## Seed and selection modes
-
-| Mode | Meaning |
-|---|---|
-| `fast` (default) | MAM skeleton with whole-query MEM completion/filtering |
-| `mumreference` | Reference-unique MAM; query repetition is allowed |
-| `mum` | Strict uniqueness in combined reference and current complete query record |
-| `smem` | Generalized `(l,c)` intervals; expand every retained reference occurrence |
-| `maxmatch` | Occurrence-complete MEM enumeration |
-
-`--min-match` is minimum seed length and SMEM's `l`.
-`--smem-min-occurrences` defaults to 1 and sets SMEM's `c`; explicitly using it
-outside `smem`, or setting it to zero, is an error. Strict MUM and SMEM enumeration
-uses complete query records and is serial at the Sufkit enumeration layer.
-MUMREFERENCE uses stable 4 MiB tiles plus boundary recovery and whole-record
-maximality/reference-uniqueness verification.
-
-Fast searches complete query records as separate forward and reverse tasks,
-scheduled dynamically with OpenMP within `--threads`. Each task performs MAM
-search followed by complete MEM search and the same MAM-coverage filtering.
-Results are merged in stable task order and sorted deterministically. A single
-query record exposes at most two search tasks, even with `--threads 32`.
-Concurrent tasks require their own search buffers and reverse-complement
-storage; peak search memory can increase relative to serial enumeration.
-
-Ordinary `ramag align` always intersects the reference-side and query-side DP
-selections, links compatible neighboring records, and fills supported bounded
-gaps. It uses `linked-one-to-one`, `bounded`, and no additional vacant/chain
-recovery. These are algorithm stages, not CLI switches. `--selection-mode`,
-`--link-gap-mode`, and `--link-recovery-mode` have been removed and produce an
-unknown-option error; remove them from existing commands.
-
-This changes the old default from all candidates to a linked bilateral main
-path. Alternative repeat placements may therefore disappear; this is not an
-output-equivalent change relative to the old `all` default. It is equivalent
-to explicitly selecting linked/bounded/no-recovery in the preceding version.
-The selection is not equivalent to MUMmer4 `delta-filter -1`.
-
-The `batch` candidate-output workflow, `align -c` centromere workflow and
-library defaults retain their existing semantics. Library callers can still
-select candidate, unlinked and linked modes through `AlignmentOptions`. Optional
-recovery experiments are retired; see [migration](migration.md).
-See [main-path linking](mainpath-linking.md) for coordinates and gap limits.
-
-## Alignment options
-
-| Option | Default | Effect |
+| Option | Default | Use |
 |---|---:|---|
-| `--threads` | 1 | Shared worker budget |
-| `--min-match` | 20 | Minimum exact seed length |
-| `--max-gap` | 90 | Cluster/chaining gap constraint |
-| `--diag-diff` | 5 | Absolute diagonal slack |
-| `--diag-factor` | 0.12 | Relative diagonal slack |
-| `--min-cluster` | 65 | Minimum matching support |
-| `--break-length` | 200 | Compatibility parsing only; nondefault rejected |
-| `--max-dp-cells` | 4000000 | Compatibility parsing only; nondefault rejected |
+| `--threads N` | 1 | Worker budget, not a memory limit |
+| `--progress auto\|on\|off` | `auto` | Terminal progress; auto requires a TTY |
+| `--progress-interval N` | 10 | Seconds between progress reports; minimum 1 |
+| `--print-effective-config` | off | Validate and print configuration without aligning |
+| `--seed-mode MODE` | `fast` | Genome seed mode |
+| `--min-match N` | 20 | Minimum exact genome seed length |
+| `--smem-min-occurrences N` | 1 | Reference occurrence threshold, SMEM mode only |
+| `--max-gap N` | 90 | Genome seed-chain gap constraint |
+| `--diag-diff N` | 5 | Absolute genome diagonal slack |
+| `--diag-factor X` | 0.12 | Relative genome diagonal slack |
+| `--min-cluster N` | 65 | Minimum genome matching support |
 
-KSW2 uses the current pairwise scoring, certified global bandwidth expansion and
-endpoint extension. CLI parameters do not select an alternate DP backend.
-Use the same command with `--print-effective-config` to inspect its configuration
-without running alignment. The output is `key=value` text, not JSON and not a
-runtime manifest. No log is created for help, version or effective config.
+Seed modes are `fast`, `mumreference`, `mum`, `smem`, and `maxmatch`.
+`fast` is the default; `mumreference` requires reference uniqueness while
+allowing query repetition; `mum` requires strict combined reference/query-record
+uniqueness. `smem` and `maxmatch` can enumerate many repeat occurrences and use
+more resources. An explicit `--smem-min-occurrences` outside SMEM is rejected.
+Use `--help` for the current options.
 
-## Formats and coordinate interpretation
+`--break-length` and `--max-dp-cells` are compatibility-only arguments: only their
+default values, 200 and 4000000 respectively, are accepted. They do not select a
+solver or change centromere gap budgets. An explicit progress interval cannot
+accompany `--progress off`. Effective configuration is `key=value` text, not JSON.
 
-All writers consume the same finalized alignment records. SAM uses one-based
-reference POS, CIGAR/clipping and reverse flags. PAF uses zero-based half-open
-forward-coordinate intervals and an explicit query strand; `cg` carries CIGAR.
-SAM `NM`/`MD` and PAF scoring/edit tags describe the alignment, not confidence.
-MAPQ is currently 255 (unavailable), not a calibrated probability.
+## Logs and exit status
 
-Delta uses one-based inclusive endpoints, reversed query endpoints for minus
-alignments, and indel displacement encoding. Pairwise MAF uses a positive target
-row and oriented query row; minus-query start is `query_size - query_end`.
-UCSC chain uses reference as positive target and the query's actual orientation.
-Chain removes unrepresentable terminal gaps and normalizes internal block gaps.
-MAF and chain preserve the emitted record set rather than filtering secondary
-records again; SAM-specific primary/supplementary status does not imply filtering
-in another format.
+Each run logs under `WORK/runs/RUN_ID/run.log`. Logs include the command,
+configuration, input counts, stages, resource observations and final status.
+Batch query logs are under `WORK/queries/NAME/runs/RUN_ID/run.log`.
+Progress-off does not suppress final errors or the run log. Linux RSS is a
+process observation, not the sum of stage memory capacities.
 
-## Logs, progress and signals
-
-CLI execution creates `WORK/runs/<run-id>/run.log` and prints its location to
-stderr. spdlog records timestamps and levels, invocation, build identity, effective
-configuration, input counts, index action/encoding, stage timings, core statistics,
-requested artifacts and final status/exit code. Logs are flushed on exit and
-retained after failure. Failure before a logger can be created is reported to
-stderr. There are no SHA-256 digests, runtime manifests or completion markers.
-
-`--progress auto` shows terminal progress only when stderr is a TTY. `on` forces
-periodic progress; `off` suppresses it. The default interval is 10 seconds; an
-explicit interval must be at least 1 and cannot accompany `off`. Stage logs and
-final/error messages remain available even when periodic progress is off.
-Reports include stage, elapsed time, known counts, thread budget and Linux RSS.
-Third-party operations without measurable totals report heartbeats.
-
-```bash
-ramag align --reference reference.fa --reference-index reference.sufidx \
-  --query query.fa --output job.paf --work-dir job-work --threads 8 \
-  --progress on >job.stdout 2>job.stderr &
-pid=$!
-kill -USR1 "$pid"  # request a snapshot; does not terminate
-wait "$pid"
-status=$?
-test "$status" -eq 0 && test -s job.paf
-```
-
-SIGINT and SIGTERM request cooperative cancellation and exit 130/143. An internal
-Sufkit/CaPS/divsufsort call may delay cancellation until it returns control.
-Signal handlers only set flags. No resume/checkpoint interface is provided;
-rerun with a new output prefix and reuse a successfully saved index if available.
-
-## Large references and multiple queries
-
-Define `REF`, `QUERY`, `INDEX`, `PREFIX`, and `WORK` for your own data and paths.
-
-```bash
-ramag index --reference "$REF" --output "$INDEX" --work-dir "$WORK/index" --threads 32
-ramag align --reference "$REF" --query "$QUERY" --reference-index "$INDEX" \
-  --output "$PREFIX.paf" --output "$PREFIX.maf" --work-dir "$WORK/align" \
-  --threads 32 --seed-mode mumreference \
-  --print-effective-config
-ramag align --reference "$REF" --query "$QUERY" --reference-index "$INDEX" \
-  --output "$PREFIX.paf" --output "$PREFIX.maf" --work-dir "$WORK/align" \
-  --threads 32 --seed-mode mumreference --progress on
-```
-
-For multiple queries, repeat alignment with the same reference/index and separate
-query, output prefix and work directory. Index loading and reference validation
-remain part of each command's elapsed time. CPU affinity must permit the requested
-thread count; the executable preserves its launch-authorized CPU set.
-
-## Exit codes and migration
-
-| Code | Meaning |
+| Exit code | Meaning |
 |---|---|
-| 0 | Requested artifacts validated and published |
+| 0 | Requested outputs validated and published |
 | 2 | CLI/configuration error |
 | 3 | FASTA/input error |
-| 4 | Unsupported input/mode |
+| 4 | Unsupported input or mode |
 | 5 | Dependency/index error |
 | 6 | Compute/resource error |
 | 7 | Output, validation or logging error |
 | 8 | Unexpected internal exception |
-| 130 / 143 | Cooperative SIGINT / SIGTERM interruption |
+| 130 / 143 | SIGINT / SIGTERM interruption |
 
-Replace automation that waits for `.complete` or reads `.manifest.json` with
-process-exit checks, output parsing and `run.log` inspection. Index bundles become
-single files; old companion files can be left in place. Library consumers of
-removed manifest/SHA-256/SeqPro headers must migrate to `RunStatistics`, `ReadFasta`
-or the existing pairwise interfaces. No version-number change is made here.
-
-Current limitations include no automatic comparison/report pipeline, automatic
-index discovery, random-access gzip index, compressed output, BAM/CRAM, VCF,
-coverage/HTML report, calibrated MAPQ or cross-query-record strict-MUM uniqueness.
-Performance conclusions require separately accepted measurements.
+Check process exit status and logs rather than waiting for a `.complete` file
+or `.manifest.json`; these completion artifacts are not produced. For help with
+failed or partial runs, see [troubleshooting](troubleshooting.md).

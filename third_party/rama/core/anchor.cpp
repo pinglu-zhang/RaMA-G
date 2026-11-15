@@ -1,5 +1,5 @@
 // Modified for RaMA-G: library ownership/safety and deterministic N adaptation.
-// Original algorithm rules and detailed changes: docs/centromere-rama-integration.md.
+// Original algorithm rules and detailed changes: LICENSE.
 /*
  * Copyright [2024] [MALABZ_UESTC Pinglu Zhang]
  *

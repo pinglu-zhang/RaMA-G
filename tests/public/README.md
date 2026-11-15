@@ -9,5 +9,4 @@ and rollback, or the backend-OFF error. `install` compiles retained public APIs
 using an isolated install prefix.
 
 The scripts use only Python's standard library. Samtools adds an optional SAM
-round trip. CTest registers these tests independently of internal research tests;
-CI treats an absent suite as an error.
+round trip. CTest registers this small suite directly; CI treats an absent suite as an error.

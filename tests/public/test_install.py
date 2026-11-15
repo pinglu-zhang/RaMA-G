@@ -25,6 +25,17 @@ with tempfile.TemporaryDirectory(prefix='consumer-', dir=a.root) as d:
     for command in commands:
         cp = subprocess.run(command, text=True, capture_output=True, timeout=90)
         assert cp.returncode == 0, (command, cp.stdout, cp.stderr)
+    licenses = prefix / 'share' / 'ramag'
+    assert (licenses / 'LICENSE').read_bytes() == (a.source.parents[1] / 'LICENSE').read_bytes()
+    expected_licenses = ['ksw2/LICENSE', 'spdlog/LICENSE', 'kseq/kseq.h',
+                         'rama/LICENSE', 'sufkit/LICENSE']
+    expected_licenses += ['sufkit/' + name + '/LICENSE' for name in
+                          ['parlaylib', 'kseq', 'caps-sa', 'libdivsufsort', 'sdsl']]
+    if a.backend.upper() == 'ON':
+        expected_licenses += ['wfa2/LICENSE', 'centrolign_stitch/LICENSE']
+    for name in expected_licenses:
+        path = licenses / 'third_party' / name
+        assert path.is_file() and path.stat().st_size > 0, str(path)
     commands_json = json.loads((build / 'compile_commands.json').read_text())
     assert commands_json
     assert not (prefix / 'include' / 'ramag' / 'internal').exists()

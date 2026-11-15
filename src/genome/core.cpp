@@ -1,6 +1,6 @@
 #include "ramag/internal/genome.hpp"
 // Pairwise alignment kernel. Source attribution and MIT notice are retained
-// in THIRD_PARTY_NOTICES.md. Do not substitute unrelated gap backends.
+// in LICENSE. Do not substitute unrelated gap backends.
 #include "ramag/pairwise_core.hpp"
 #include "ksw2.h"
 #include <algorithm>

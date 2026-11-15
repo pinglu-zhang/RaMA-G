@@ -20,3 +20,89 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+=======================================================================
+Third-party components and source attribution
+=======================================================================
+
+The MIT text above covers RaMA-G's original code. Separately licensed
+components below retain their own terms; this section does not relicense
+them. Full bundled license texts and per-file notices remain with the sources.
+Installation copies the applicable dependency licenses into share/ramag.
+
+RaMA-derived centromere code: Apache-2.0, copyright 2024
+MALABZ_UESTC Pinglu Zhang. Source: https://github.com/pinglu-zhang/RaMA,
+commit 7bc89c4902bc9254f18cc4b05c4bf491a10bd7cb.
+See third_party/rama/LICENSE and original notices in third_party/rama/core.
+Local changes provide library ownership, checked coordinates, deterministic
+unknown-base handling, cancellation and memory safety. Modified files retain
+prominent modification notices. Original reference snapshots are not required
+by the production build.
+
+RaMAx-derived pairwise code: MIT, copyright 2026 Pinglu Zhang. Source:
+https://github.com/pinglu-zhang/RaMAx,
+revision 7d08359e0df7f7e6ffcfe67217c3399761cb2129.
+The extracted pairwise anchor, cluster, connection, alignment and CIGAR code
+uses checked 64-bit coordinates and owned library records; coordinate and DP
+comparison corrections are retained. Graph/multispecies orchestration is not
+part of this component. The same revision supplied kseq and spdlog snapshots.
+
+KSW2: MIT; see third_party/ksw2/LICENSE and upstream notices in its sources.
+kseq: MIT, copyright Attractive Chaos; its complete notice remains embedded
+in third_party/kseq/kseq.h and is included with installed license materials.
+spdlog: MIT, copyright 2016 Gabi Melman; see third_party/spdlog/LICENSE.
+Embedded fmt has its own MIT notice, reproduced below and retained in headers.
+
+Sufkit: MIT, copyright 2026 sufkit contributors. Source:
+https://github.com/malabz/sufkit,
+commit 028075e6f2d622fcbdcf76b153bbde0f069ca64f.
+Its license and licenses shipped for bundled parlaylib, kseq, CaPS-SA,
+libdivsufsort and SDSL accompany the installed dependency materials.
+RaMA-G does not directly depend on SeqPro.
+
+WFA2: MIT; source https://github.com/smarco/WFA2-lib,
+commit 99a5879a3a2972eff168cbcc6610b6cf02844ed0.
+Its license is installed when the centromere backend is enabled. Four patched
+translation units in third_party/rama/wfa_safety preserve upstream notices
+and replace unaligned accesses and an undefined empty-trace shift without
+changing alignment penalties or heuristic defaults.
+
+Centrolign kernel subset: MIT; source https://github.com/jeizenga/centrolign,
+commit a604cbdcff2e22e643fc9e17d4679296ee5e42fe.
+See third_party/centrolign_stitch/LICENSE. Local changes isolate namespaces,
+account for scoped kernel allocations, add cooperative interruption and use
+an equivalent allocation-free iterative gcd. Only fixed-endpoint linear-graph
+DP and unpruned wavefront kernels are integrated; anchoring and graph merging
+are not imported. Original copyright notices remain in source files.
+
+Embedded fmt notice
+-------------------
+Formatting library for C++
+
+  Copyright (c) 2012 - present, Victor Zverovich
+
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  --- Optional exception to the license ---
+
+  As an exception, if, as a result of your compiling your source code, portions
+  of this Software are embedded into a machine-executable object form of such
+  source code, you may redistribute such embedded portions in such object form
+  without including the above copyright and permission notices.
