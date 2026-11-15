@@ -2,18 +2,47 @@
 
 ## Source map
 
-The product has two workflows sharing input, indexing, CIGAR and output contracts:
+Project headers live under `include`; implementation files live under `src`.
+The ten existing `include/ramag/*.hpp` paths remain the supported public API.
+`include/ramag/internal/` contains private declarations and required templates;
+it is shipped with source packages but is never installed or used by public headers.
 
-- Application entry, workflow orchestration, logging and cancellation.
-- FASTA and common alignment writers.
-- Reference index and Sufkit adapter.
-- Genome core and bounded main-path linking.
-- Centromere backend, direction, anchors, copies, stitching, review and output.
+```text
+include/ramag/              supported public headers
+include/ramag/internal/     private app, I/O, index, genome and centromere headers
+src/app/                   CLI, orchestration, progress, logging and cancellation
+src/io/                    FASTA input and common format writers
+src/index/                 reference-index persistence and Sufkit adaptation
+src/genome/                alignment orchestration, core chaining/selection,
+                           KSW2 extension and bounded main-path linking
+src/centromere/            backend, direction, anchors, copies, stitching,
+                           refinement and consolidated result writers
+third_party/               pinned dependencies, licenses and source attribution
+```
 
-Private code is organized under these functional directories. Installed
-`include/ramag` headers define the supported library boundary. A file's presence
-in a source checkout does not make it a public API. Third-party code remains in
-`third_party` with original licensing and source attribution.
+The genome entry implementation delegates to the core, extension and linking
+translation units. Centromere direction processing separates evidence collection,
+planning, orientation assignment and compiled review rules. Recursive anchors,
+copy discovery, internal-gap stitching and later path refinement remain distinct
+stages. Diagnostic tables and alignment-format rendering are consolidated in the
+centromere output implementation rather than mixed into direction search.
+
+Each stage declares cross-file dependencies through private headers. There are
+no project headers or implementation fragments in `src`, and no implementation
+file is textually included by another source file or test. Ordinary review entry
+points are compiled once; callback-dependent search visitors retain statically
+typed templates without runtime type erasure or extra data copies.
+
+The small `centromere_overlap_compatibility.hpp` header remains separate because
+the pinned RaMA sources include that exact name. Its include directory is private
+to the dependency build. This preserves the third-party source and license files.
+Genome HOXD70 and centromere three-piece kernels remain separate scoring models.
+
+Public headers must be self-contained and must not include private headers.
+I/O and seed-index declarations do not include the CLI parser. Application-only
+configuration conversion stays in the application layer; forward declarations
+avoid pulling command parsing into lower-level interfaces. A source file's
+presence in a checkout does not make it a supported API.
 
 ## Build and public tests
 

@@ -1,4 +1,4 @@
-#include "common/centromere.hpp"
+#include "ramag/internal/common/centromere.hpp"
 #include "ramag/centromere_copy_anchors.hpp"
 #include <algorithm>
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <tuple>
 #if RAMAG_HAVE_CENTROMERE
 #include "anchor.h"
-#include "centromere/copy/count_cache.hpp"
+#include "ramag/internal/centromere/copy/count_cache.hpp"
 #endif
 
 namespace ramag {

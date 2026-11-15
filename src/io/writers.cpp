@@ -1,6 +1,6 @@
-#include "io/writers.hpp"
+#include "ramag/internal/io.hpp"
 
-#include "app/runtime.hpp"
+#include "ramag/internal/app/runtime.hpp"
 
 #include "ramag/alignment.hpp"
 
@@ -281,19 +281,7 @@ OutputPaths MakeOutputPaths(const std::filesystem::path& prefix) {
           base + ".chain"};
 }
 
-OutputPaths MakeOutputPaths(const RunSpec& spec) {
-  auto paths = MakeOutputPaths(spec.output_prefix);
-  for (const auto& request : spec.outputs) {
-    switch (request.format) {
-      case OutputFormat::Sam: paths.sam = request.path; break;
-      case OutputFormat::Paf: paths.paf = request.path; break;
-      case OutputFormat::Delta: paths.delta = request.path; break;
-      case OutputFormat::Maf: paths.maf = request.path; break;
-      case OutputFormat::Chain: paths.chain = request.path; break;
-    }
-  }
-  return paths;
-}
+
 
 std::string SamCigar(const AlignmentRecord& alignment, Length query_length) {
   if (alignment.query_end > query_length) {

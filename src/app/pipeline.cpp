@@ -1,5 +1,5 @@
-#include "centromere/refinement/refinement.hpp"
-#include "app/pipeline.hpp"
+#include "ramag/internal/centromere/refinement.hpp"
+#include "ramag/internal/app/pipeline.hpp"
 #include "ramag/centromere_direction.hpp"
 #include "ramag/centromere_blocks.hpp"
 #include "ramag/centromere_directed_anchors.hpp"
@@ -9,12 +9,12 @@
 #include "ramag/pairwise_core.hpp"
 
 #include "ramag/alignment.hpp"
-#include "io/fasta.hpp"
-#include "index/reference_index.hpp"
-#include "app/runtime.hpp"
-#include "app/logging.hpp"
+#include "ramag/internal/io.hpp"
+#include "ramag/internal/index.hpp"
+#include "ramag/internal/app/runtime.hpp"
+#include "ramag/internal/app/runtime.hpp"
 #include <map>
-#include "index/sufkit_adapter.hpp"
+#include "ramag/internal/index.hpp"
 
 #include <algorithm>
 #include <array>

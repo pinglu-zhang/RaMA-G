@@ -1,11 +1,11 @@
-#include "app/logging.hpp"
+#include "ramag/internal/app/runtime.hpp"
 #include <memory>
-#include "app/cli.hpp"
-#include "io/fasta.hpp"
-#include "app/pipeline.hpp"
-#include "index/reference_index.hpp"
-#include "app/runtime.hpp"
-#include "io/writers.hpp"
+#include "ramag/internal/app/cli.hpp"
+#include "ramag/internal/io.hpp"
+#include "ramag/internal/app/pipeline.hpp"
+#include "ramag/internal/index.hpp"
+#include "ramag/internal/app/runtime.hpp"
+#include "ramag/internal/io.hpp"
 
 #include <filesystem>
 #include <iostream>

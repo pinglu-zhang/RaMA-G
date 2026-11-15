@@ -1,0 +1,140 @@
+#pragma once
+
+#include "ramag/alignment.hpp"
+#include "ramag/centromere.hpp"
+
+#include <cstdint>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ramag {
+struct OutputPaths;
+struct RunSpec;
+[[nodiscard]] OutputPaths MakeOutputPaths(const RunSpec& spec);
+
+struct FormatSelection {
+  bool sam{true};
+  bool paf{true};
+  bool delta{true};
+  bool maf{false};
+  bool chain{false};
+
+  [[nodiscard]] bool Any() const noexcept {
+    return sam || paf || delta || maf || chain;
+  }
+  [[nodiscard]] std::string ToString() const;
+};
+
+enum class OutputFormat : std::uint8_t { Sam, Paf, Delta, Maf, Chain };
+
+struct OutputRequest {
+  OutputFormat format{OutputFormat::Paf};
+  std::filesystem::path path;
+};
+
+enum class ProgressMode : std::uint8_t { Auto, On, Off };
+
+struct ProgressOptions {
+  ProgressMode mode{ProgressMode::Auto};
+  std::uint32_t interval_seconds{10};
+  bool interval_explicit{false};
+};
+
+struct RunSpec {
+  std::filesystem::path reference_path;
+  std::filesystem::path reference_index_path;
+  std::filesystem::path save_index_path;
+  std::filesystem::path query_path;
+  std::filesystem::path output_prefix;
+  std::vector<OutputRequest> outputs;
+  std::filesystem::path work_dir;
+  std::uint32_t threads{1};
+  FormatSelection formats{};
+  ProgressOptions progress{};
+  AlignmentOptions alignment{};
+  CentromereSpec centromere{};
+};
+
+struct IndexSpec {
+  std::filesystem::path reference_path;
+  std::filesystem::path output_path;
+  std::filesystem::path work_dir;
+  std::uint32_t threads{1};
+  ProgressOptions progress{};
+};
+
+struct BatchQuery {
+  std::string name;
+  std::filesystem::path path;
+};
+
+struct BatchSpec {
+  RunSpec common;
+  std::filesystem::path output_dir;
+  std::filesystem::path seqfile;
+  std::vector<BatchQuery> queries;
+};
+
+enum class CommandKind : std::uint8_t { Align, Index, Batch };
+
+struct OpenMpRuntimeInfo {
+  bool enabled{false};
+  std::string runtime{"unavailable"};
+  std::int32_t specification_date{0};
+  std::int32_t max_threads{1};
+  std::int32_t thread_limit{1};
+  std::int32_t dynamic{0};
+  std::int32_t max_active_levels{1};
+  std::uint32_t configured_requested_threads{0};
+};
+
+struct CpuAffinityInfo {
+  bool supported{false};
+  std::vector<std::uint32_t> logical_cpus;
+  std::string source{"unavailable"};
+
+  [[nodiscard]] std::string CpuList() const;
+};
+
+struct CliParseResult {
+  CommandKind command{CommandKind::Align};
+  RunSpec run_spec;
+  IndexSpec index_spec;
+  BatchSpec batch_spec;
+  bool show_help{false};
+  bool show_version{false};
+  bool print_effective_config{false};
+};
+
+class CliError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
+[[nodiscard]] CliParseResult ParseCommandLine(int argc, const char* const* argv);
+[[nodiscard]] std::string HelpText();
+[[nodiscard]] std::string VersionText();
+[[nodiscard]] std::string SeedModeName(SeedMode mode);
+[[nodiscard]] std::string AlignmentSelectionName(AlignmentSelection selection);
+[[nodiscard]] std::string OutputFormatName(OutputFormat format);
+[[nodiscard]] std::string ProgressModeName(ProgressMode mode);
+[[nodiscard]] std::string EffectiveConfigText(const RunSpec& spec);
+[[nodiscard]] std::string EffectiveIndexConfigText(const IndexSpec& spec);
+[[nodiscard]] OpenMpRuntimeInfo CurrentOpenMpRuntimeInfo();
+[[nodiscard]] CpuAffinityInfo CurrentCpuAffinity();
+void ValidateCpuAffinityBudget(const CpuAffinityInfo& affinity,
+                               std::uint32_t requested_threads,
+                               std::string_view context);
+void ConfigureOpenMpRuntime(const RunSpec& spec);
+void ConfigureIndexRuntime(const IndexSpec& spec,
+                           const CpuAffinityInfo& launch_affinity);
+void ValidateRunSpec(const RunSpec& spec);
+void ValidateIndexSpec(const IndexSpec& spec, bool require_suffix = true);
+void ValidateBatchSpec(const BatchSpec& spec);
+[[nodiscard]] RunSpec BatchQuerySpec(const BatchSpec& spec, const BatchQuery& query);
+[[nodiscard]] std::string EffectiveBatchConfigText(const BatchSpec& spec);
+
+}  // namespace ramag

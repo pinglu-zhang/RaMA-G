@@ -7,7 +7,8 @@
 #include <set>
 #include <tuple>
 #include <sstream>
-#include "centromere/direction/storage.hpp"
+#include "ramag/internal/centromere/direction.hpp"
+#include "ramag/internal/common/centromere.hpp"
 #if RAMAG_HAVE_CENTROMERE
 #include "anchor.h"
 #endif
@@ -640,3 +641,309 @@ CentromereDirectionResult AnalyzeCentromereDirections(const SequenceRecord& refe
 #endif
 }
 } // namespace ramag
+
+
+namespace ramag {
+namespace {
+struct Piece {
+  Position r{},q{};
+  Length n{};
+  double density{};
+  std::uint64_t id{};
+};
+void ValidateBox(const DirectionBox& b, Length r, Length q) {
+  if (b.reference_begin>b.reference_end || b.reference_end>r ||
+      b.query_begin>b.query_end || b.query_end>q)
+    throw CentromereInputError("direction region outside sequence");
+}
+}
+
+DirectionChain ScoreDirectionChain(std::span<const DirectionAnchor> anchors,
+    const DirectionBox& box, Length reference_length, Length query_length,
+    Strand direction, const std::function<void()>& interruption) {
+  ValidateBox(box,reference_length,query_length);
+  if (direction!=Strand::Forward && direction!=Strand::Reverse)
+    throw CentromereInputError("invalid direction");
+  const auto qb=direction==Strand::Forward ? box.query_begin : query_length-box.query_end;
+  const auto qe=direction==Strand::Forward ? box.query_end : query_length-box.query_begin;
+  // Signed diagonals without narrowing uint64 coordinates to int64.
+  std::map<std::pair<bool,Length>,std::vector<Piece>> groups;
+  for (const auto& a:anchors) {
+    if (!a.length || a.reference_begin>reference_length ||
+        a.length>reference_length-a.reference_begin || a.query_begin>query_length ||
+        a.length>query_length-a.query_begin || !std::isfinite(a.source_weight) ||
+        a.source_weight<0 || (a.strand!=Strand::Forward && a.strand!=Strand::Reverse))
+      throw CentromereInputError("invalid direction anchor");
+    if (a.strand!=direction) continue;
+    const auto u=direction==Strand::Forward ? a.query_begin : query_length-a.query_begin-a.length;
+    const auto rb=a.reference_begin;
+    const Length start=std::max(box.reference_begin>rb ? box.reference_begin-rb : 0,
+                               qb>u ? qb-u : 0);
+    if (rb>=box.reference_end || u>=qe) continue;
+    const Length end=std::min({a.length,box.reference_end-rb,qe-u});
+    if (end<=start) continue;
+    groups[{rb>=u,rb>=u ? rb-u : u-rb}].push_back(
+      {rb+start,u+start,end-start,a.source_weight/static_cast<double>(a.length),a.id});
+  }
+  DirectionChain out;
+  for (auto& [diagonal,pieces]:groups) {
+    (void)diagonal;
+    if (interruption) interruption();
+    std::sort(pieces.begin(),pieces.end(),[](const Piece& a,const Piece& b){
+      return std::tie(a.r,a.q,a.n,a.id)<std::tie(b.r,b.q,b.n,b.id);
+    });
+    for (std::size_t i=0;i<pieces.size();) {
+      std::size_t end=i+1;
+      Position finish=pieces[i].r+pieces[i].n;
+      while(end<pieces.size() && pieces[end].r<=finish) {
+        finish=std::max(finish,pieces[end].r+pieces[end].n); ++end;
+      }
+      DirectionChainNode n;
+      n.reference_begin=pieces[i].r; n.oriented_query_begin=pieces[i].q;
+      n.length=finish-pieces[i].r;
+      // Integrate the maximum per-base source weight, rather than summing
+      // duplicate matches or changing the primary length objective.
+      std::map<Position,std::vector<std::pair<double,bool>>> events;
+      for(std::size_t j=i;j<end;++j) {
+        const auto& p=pieces[j];
+        events[p.r].push_back({p.density,true});
+        events[p.r+p.n].push_back({p.density,false});
+        n.source_ids.push_back(p.id);
+      }
+      std::map<double,std::size_t> active;
+      Position previous=n.reference_begin;
+      for(const auto& [position,changes]:events) {
+        if(!active.empty()) n.weight+=static_cast<double>(position-previous)*active.rbegin()->first;
+        for(const auto& [density,add]:changes) {
+          if(add) ++active[density];
+          else {auto it=active.find(density); if(--it->second==0) active.erase(it);}
+        }
+        previous=position;
+      }
+      std::sort(n.source_ids.begin(),n.source_ids.end());
+      n.source_ids.erase(std::unique(n.source_ids.begin(),n.source_ids.end()),n.source_ids.end());
+      out.nodes.push_back(std::move(n)); i=end;
+    }
+  }
+  std::sort(out.nodes.begin(),out.nodes.end(),[](const auto& a,const auto& b){
+    return std::tie(a.reference_begin,a.oriented_query_begin,a.length,a.source_ids)<
+           std::tie(b.reference_begin,b.oriented_query_begin,b.length,b.source_ids);
+  });
+  // Sweep completed reference intervals and query a prefix maximum. Only
+  // predecessors with the best PRIMARY length can win; enumerate every tied
+  // predecessor to preserve the RaMA secondary score and earliest-index tie.
+  // This is exact, not a k-predecessor cap or a beam search.
+  std::vector<std::size_t> ends(out.nodes.size());
+  std::vector<Position> query_ends;
+  for(std::size_t i=0;i<ends.size();++i) {
+    ends[i]=i;query_ends.push_back(out.nodes[i].oriented_query_begin+out.nodes[i].length);
+  }
+  std::sort(ends.begin(),ends.end(),[&](auto a,auto b) {
+    return std::pair{out.nodes[a].reference_begin+out.nodes[a].length,a}<
+           std::pair{out.nodes[b].reference_begin+out.nodes[b].length,b};
+  });
+  std::sort(query_ends.begin(),query_ends.end());
+  query_ends.erase(std::unique(query_ends.begin(),query_ends.end()),query_ends.end());
+  struct Frontier {Length support{};std::vector<std::size_t> indices;};
+  std::vector<Frontier> tree(query_ends.size()+1);
+  std::size_t completed=0;
+  for(std::size_t i=0;i<out.nodes.size();++i) {
+    if(interruption) interruption();
+    auto& current=out.nodes[i];
+    current.support=current.length; current.source_score=current.weight;
+    while(completed<ends.size() &&
+          out.nodes[ends[completed]].reference_begin+out.nodes[ends[completed]].length<=current.reference_begin) {
+      const auto j=ends[completed++];const auto& node=out.nodes[j];
+      auto p=static_cast<std::size_t>(std::lower_bound(query_ends.begin(),query_ends.end(),
+        node.oriented_query_begin+node.length)-query_ends.begin())+1;
+      for(;p<tree.size();p+=p&(~p+1)) {
+        auto& entry=tree[p];
+        if(node.support>entry.support) {entry.support=node.support;entry.indices.clear();}
+        if(node.support==entry.support)entry.indices.push_back(j);
+      }
+    }
+    Length best_support=0;std::vector<std::size_t> eligible;
+    auto p=static_cast<std::size_t>(std::upper_bound(query_ends.begin(),query_ends.end(),
+      current.oriented_query_begin)-query_ends.begin());
+    for(;p;p-=p&(~p+1)) {
+      const auto& entry=tree[p];
+      if(entry.support>best_support) {best_support=entry.support;eligible.clear();}
+      if(entry.support==best_support)eligible.insert(eligible.end(),entry.indices.begin(),entry.indices.end());
+    }
+    std::sort(eligible.begin(),eligible.end());
+    for(const auto j:eligible) {
+      const auto& prior=out.nodes[j];
+      const auto length=prior.support+current.length;
+      const auto rg=current.reference_begin-prior.reference_begin;
+      const auto qg=current.oriented_query_begin-prior.oriented_query_begin;
+      const auto delta=rg>=qg ? rg-qg : qg-rg;
+      const double cost=2.0*std::log2(static_cast<double>(delta)+1.0);
+      const double score=prior.source_score+(current.weight>cost ? current.weight-cost : 0.1);
+      if(length>current.support || (length==current.support && score>current.source_score)) {
+        current.support=length; current.source_score=score; current.predecessor=j;
+      }
+    }
+    if(out.best==kNoDirectionNode || current.support>out.support ||
+       (current.support==out.support && current.source_score>out.nodes[out.best].source_score)) {
+      out.best=i; out.support=current.support;
+    }
+  }
+  return out;
+}
+} // namespace ramag
+
+#if RAMAG_HAVE_CENTROMERE
+#include "anchor.h"
+#endif
+
+namespace ramag::detail {
+namespace {
+using Box=std::tuple<Position,Position,Position,Position>;
+using Diagonal=std::tuple<Strand,bool,Length>;
+[[maybe_unused]] Box Key(const CentromereRefinementRegion& r){return {r.reference_begin,r.reference_end,r.query_begin,r.query_end};}
+// Mapping novelty is an interval union on the SAME oriented diagonal, not
+// a new (start,length) tuple. Rediscovering a submatch adds no paired column.
+struct Coverage {
+  std::map<Diagonal,std::map<Position,Position>> intervals;
+  std::size_t segments{};
+  bool Add(const CentromerePlanningAnchor& c,Length qlength) {
+    const auto& a=c.anchor;const auto u=c.strand==Strand::Forward ? a.query_begin : qlength-a.query_begin-a.length;
+    auto& line=intervals[{c.strand,a.reference_begin>=u,a.reference_begin>=u ? a.reference_begin-u : u-a.reference_begin}];
+    auto it=line.upper_bound(a.reference_begin);
+    if(it!=line.begin() && std::prev(it)->second>=a.reference_begin+a.length)return false;
+    auto begin=a.reference_begin,end=a.reference_begin+a.length;
+    if(it!=line.begin() && std::prev(it)->second>=begin)it=std::prev(it);
+    while(it!=line.end() && it->first<=end) {
+      begin=std::min(begin,it->first);end=std::max(end,it->second);it=line.erase(it);--segments;
+    }
+    line.emplace(begin,end);++segments;return true;
+  }
+  std::size_t Bytes() const {return intervals.size()*(sizeof(Diagonal)+sizeof(std::map<Position,Position>)+64)+segments*(sizeof(Position)*2+64);}
+};
+[[maybe_unused]] void Check(const CentromereBlockOptions& o) {
+  if(o.interruption_callback)o.interruption_callback("centromere-region-refinement");
+}
+}
+CentromereBlockResult RefineDirectionRegions(const SequenceRecord& reference,const SequenceRecord& query,
+    CentromereBlockResult plan,const CentromereBlockOptions& options,Strand preferred) {
+#if RAMAG_HAVE_CENTROMERE
+  const auto root_count=plan.root_candidates.size();
+  std::set<Box> visited;
+  Coverage mappings;
+  for(const auto& a:plan.root_candidates)(void)mappings.Add(a,query.size());
+  std::vector<CentromereRefinementRegion> history;
+  std::vector<CentromereRefinementRegion> pending;
+  std::vector<CentromereLocalEvidence> provenance;
+  std::uint64_t round=0,searches=0,new_mappings=0,peak=plan.planner_reserved_bytes;
+  auto capacity=[&] {
+    // Conservatively include node allocation overhead of the provenance maps;
+    // suffix-index memory is independently guarded by the process RSS limit.
+    const auto bytes=plan.root_candidates.capacity()*sizeof(CentromerePlanningAnchor)+
+      history.capacity()*sizeof(CentromereRefinementRegion)+provenance.capacity()*sizeof(CentromereLocalEvidence)+
+      mappings.Bytes()+visited.size()*(sizeof(Box)+64);
+    peak=std::max(peak,static_cast<std::uint64_t>(bytes));
+    if(bytes>options.planner_memory_limit_bytes)throw CentromereBudgetExceeded("refinement_memory_budget");
+  };
+  std::string partial_reason;
+  try {
+  for(;;) {
+    Check(options);
+    pending.clear();
+    for(auto task:plan.refinement_regions) {
+      if(task.reference_begin>=task.reference_end || task.query_begin>=task.query_end)continue;
+      if(visited.insert(Key(task)).second) {
+        task.id=history.size()+pending.size()+1;task.round=round+1;pending.push_back(task);
+      }
+    }
+    if(pending.empty())break;
+    ++round;capacity();
+    const auto previous_count=plan.root_candidates.size();
+    // One full-input index at a time. Region counts remain local; the separate
+    // full-input count query never mistakes local uniqueness for global rarity.
+    for(const auto sign:{Strand::Forward,Strand::Reverse}) {
+      std::string reverse;
+      if(sign==Strand::Reverse) {
+        reverse.resize(query.size());
+        for(std::size_t i=0;i<query.size();++i) {
+          const char c=query.bases[i];
+          reverse[query.size()-i-1]=c=='A' ? 'T' : c=='C' ? 'G' : c=='G' ? 'C' : c=='T' ? 'A' : 'N';
+        }
+      }
+      std::vector<rama_source::SequenceInfo> sequences{
+        {reference.bases,reference.name,static_cast<uint_t>(reference.size())},
+        {sign==Strand::Forward ? std::string_view(query.bases) : std::string_view(reverse),query.name,static_cast<uint_t>(query.size())}};
+      rama_source::AnchorFinder finder(sequences,"",options.worker_threads==1 ? 0 : options.worker_threads,
+        false,false,100,[&]{Check(options);});
+      // Views share the immutable reference; equal patterns at distinct repeat
+      // copies reuse one exact full-input count without storing sequence copies.
+      std::map<std::string_view,std::pair<std::uint32_t,std::uint32_t>> full_counts;
+      for(auto& task:pending) {
+        Check(options);++searches;
+        if(options.progress_callback)options.progress_callback("centromere-region-refinement",task.id,pending.back().id);
+        const auto u=sign==Strand::Forward ? task.query_begin : query.size()-task.query_end;
+        finder.visitRegionCandidates({static_cast<uint_t>(task.reference_begin),static_cast<uint_t>(task.reference_end-task.reference_begin),
+          static_cast<uint_t>(u),static_cast<uint_t>(task.query_end-task.query_begin)},false,
+          [&](const rama_source::RareCandidate& c) {
+            const auto& a=c.pair;
+            if(!c.first_hit_level || a.second_pos<reference.size()+1)throw AlignmentError("invalid v4 first-hit source");
+            const auto qu=a.second_pos-reference.size()-1;
+            const auto qb=sign==Strand::Forward ? qu : query.size()-qu-a.match_length;
+            if(a.first_pos<task.reference_begin || a.first_pos>task.reference_end ||
+              a.match_length>task.reference_end-a.first_pos || qb<task.query_begin || qb>task.query_end ||
+              a.match_length>task.query_end-qb)throw AlignmentError("v4 local anchor outside its actual search rectangle");
+            CentromerePlanningAnchor candidate{{a.first_pos,qb,a.match_length,a.weight},sign,
+              static_cast<std::uint32_t>(c.reference_count),static_cast<std::uint32_t>(c.query_count),static_cast<std::uint32_t>(c.level)};
+            // Dedup by coordinate mapping. Original candidates stay immutable;
+            // discovery of a local higher weight never rewrites their rarity.
+            if(!mappings.Add(candidate,query.size()))return;
+            const auto pattern=std::string_view(reference.bases).substr(a.first_pos,a.match_length);
+            auto count=full_counts.find(pattern);
+            if(count==full_counts.end()) {
+              const auto n=finder.countFullOccurrences(a.first_pos,a.match_length);
+              count=full_counts.emplace(pattern,std::pair{static_cast<std::uint32_t>(n.first),static_cast<std::uint32_t>(n.second)}).first;
+            }
+            const auto counts=count->second;
+            const auto id=plan.root_candidates.size();
+            plan.root_candidates.push_back(candidate);
+            provenance.push_back({id,task.id,static_cast<std::uint32_t>(counts.first),static_cast<std::uint32_t>(counts.second)});
+            ++task.new_mappings;++new_mappings;capacity();
+          });
+      }
+    }
+    for(auto& task:pending){task.status="searched";history.push_back(std::move(task));}
+    pending.clear();
+    capacity();
+    if(plan.root_candidates.size()==previous_count)break;
+    // Release the old plan and its path/index storage before rebuilding. The
+    // single compact candidate store is moved, not copied, into the new sweep.
+    auto candidates=std::move(plan.root_candidates);
+    peak=std::max(peak,plan.planner_reserved_bytes);
+    auto local_options=options;
+    const auto auxiliary=history.capacity()*sizeof(CentromereRefinementRegion)+
+      provenance.capacity()*sizeof(CentromereLocalEvidence)+mappings.Bytes()+visited.size()*(sizeof(Box)+64);
+    std::uint64_t retained_plan=plan.blocks.capacity()*sizeof(CentromereBlock)+plan.regions.capacity()*sizeof(CentromereDirectionRegion);
+    for(const auto& b:plan.blocks)retained_plan+=b.planning_anchors.capacity()*sizeof(CentromereAnchor);
+    try {
+      if(auxiliary+retained_plan>=options.planner_memory_limit_bytes)throw CentromereBudgetExceeded("refinement_replan_memory_budget");
+      local_options.planner_memory_limit_bytes-=auxiliary+retained_plan;
+      auto next=ReplanDirectionRegions(reference.size(),query.size(),candidates,local_options,preferred);
+      plan=std::move(next);
+    } catch(...) {plan.root_candidates=std::move(candidates);throw;}
+    peak=std::max(peak,plan.planner_reserved_bytes+auxiliary+retained_plan);
+  }
+  } catch(const CentromereBudgetExceeded& e) {partial_reason=e.what();}
+    catch(const std::bad_alloc&) {partial_reason="refinement_allocation_failed";}
+  if(!partial_reason.empty()) {
+    for(auto& task:pending){task.status="partial_search";history.push_back(std::move(task));}
+    plan.refinement_partial_reason=std::move(partial_reason);
+  }
+  plan.root_candidate_count=root_count;plan.local_candidates=std::move(provenance);
+  plan.refinement_regions=std::move(history);plan.refinement_rounds=round;plan.refinement_searches=searches;
+  plan.refinement_new_mappings=new_mappings;plan.planner_reserved_bytes=std::max(peak,plan.planner_reserved_bytes);
+  return plan;
+#else
+  (void)reference;(void)query;(void)plan;(void)options;(void)preferred;
+  throw DependencyError("direction refinement requires source RaMA backend");
+#endif
+}
+} // namespace ramag::detail

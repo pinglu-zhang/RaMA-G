@@ -194,26 +194,28 @@ if(RAMAG_CENTROMERE_DIRECTIONS AND NOT RAMAG_CENTROMERE_ANCHORS_ONLY)
   message(FATAL_ERROR "Direction evidence is anchors-only; enable RAMAG_CENTROMERE_ANCHORS_ONLY")
 endif()
 set(RAMAG_WFA2_SOURCE_DIR "" CACHE PATH "Clean pinned WFA2 source override")
-add_library(ramag_centromere STATIC src/centromere/backend/alignment.cpp src/centromere/backend/input.cpp
+add_library(ramag_centromere STATIC src/centromere/backend/backend.cpp
   src/centromere/direction/blocks.cpp
   src/centromere/anchors/directed.cpp
   src/centromere/copy/anchors.cpp
   src/centromere/stitch/stitch.cpp
 
-  src/centromere/refinement/root.cpp
-  src/centromere/refinement/block.cpp
+  src/centromere/refinement/endpoints.cpp
+
   src/centromere/refinement/cross_region.cpp
-  src/centromere/refinement/joint.cpp
-  src/centromere/refinement/unplanned.cpp
+  src/centromere/refinement/path.cpp
+
   src/centromere/refinement/block_dp.cpp
-  src/centromere/output/formats.cpp
+  src/centromere/output.cpp
   src/centromere/stitch/kernel.cpp
   src/centromere/direction/planner.cpp
-  src/centromere/direction/regions.cpp
-  src/centromere/direction/evidence.cpp src/centromere/direction/geometry.cpp src/centromere/output/direction.cpp)
+  src/centromere/direction/orientation.cpp
+  src/centromere/direction/review.cpp
+  src/centromere/direction/evidence.cpp
+    )
 add_library(RaMAG::centromere ALIAS ramag_centromere)
 target_compile_features(ramag_centromere PUBLIC cxx_std_20)
-target_include_directories(ramag_centromere PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(ramag_centromere PRIVATE "${PROJECT_SOURCE_DIR}/include")
 target_compile_definitions(ramag_centromere PRIVATE
   RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_ISLAND_CONTEXT_REVIEW}>
   RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW=$<BOOL:${RAMAG_CENTROMERE_DIRECTION_PLAN_REVIEW}>
@@ -288,7 +290,7 @@ if(RAMAG_ENABLE_CENTROMERE)
     "${_stitch_vendor}/src/logging.cpp")
   target_compile_features(ramag_centrolign_stitch_objects PRIVATE cxx_std_20)
   target_include_directories(ramag_centrolign_stitch_objects SYSTEM PRIVATE "${_stitch_vendor}/include")
-  target_include_directories(ramag_centrolign_stitch_objects PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_include_directories(ramag_centrolign_stitch_objects PRIVATE "${PROJECT_SOURCE_DIR}/include")
   set_target_properties(ramag_centrolign_stitch_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_sources(ramag_centromere PRIVATE $<TARGET_OBJECTS:ramag_centrolign_stitch_objects>)
   target_include_directories(ramag_centromere SYSTEM PRIVATE "${_stitch_vendor}/include")
@@ -314,8 +316,8 @@ if(RAMAG_ENABLE_CENTROMERE)
     third_party/rama/core/anchor.cpp
   )
   target_compile_features(ramag_rama_dependencies PRIVATE cxx_std_20)
-  target_include_directories(ramag_rama_dependencies PRIVATE third_party/rama/core "${PROJECT_SOURCE_DIR}/src/centromere/backend")
-  target_include_directories(ramag_rama_dependencies PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(ramag_rama_dependencies PRIVATE third_party/rama/core "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere")
+  target_include_directories(ramag_rama_dependencies PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
   target_compile_definitions(ramag_rama_dependencies PRIVATE
     RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY=$<BOOL:${RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY}>
     RAMAG_CENTROMERE_NODE_COVERAGE_GUARD=$<BOOL:${RAMAG_CENTROMERE_NODE_COVERAGE_GUARD}>
@@ -367,7 +369,7 @@ if(RAMAG_ENABLE_CENTROMERE)
   )
   target_include_directories(ramag_wfa_objects SYSTEM PRIVATE "${_wfa}" "${_wfa}/wavefront")
   target_compile_options(ramag_wfa_objects PRIVATE -fexceptions
-    -include "${PROJECT_SOURCE_DIR}/src/centromere/backend/wfa_hooks.h")
+    -include "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere/backend/wfa_hooks.h")
   set_target_properties(ramag_wfa_objects PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
   target_sources(ramag_centromere PRIVATE src/centromere/backend/wfa_memory.cpp
     $<TARGET_OBJECTS:ramag_rama_dependencies> $<TARGET_OBJECTS:ramag_wfa_objects>)

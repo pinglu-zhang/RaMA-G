@@ -1,6 +1,6 @@
-#include "io/fasta.hpp"
+#include "ramag/internal/io.hpp"
 
-#include "app/runtime.hpp"
+#include "ramag/internal/app/runtime.hpp"
 
 #include <algorithm>
 #include <array>

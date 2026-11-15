@@ -1,7 +1,7 @@
-#include "detail.hpp"
-#include "centromere/refinement/block_dp.hpp"
-#include "centromere/stitch/kernel.hpp"
-#include "centromere/stitch/fixed_gaps.hpp"
+#include "ramag/internal/centromere/refinement.hpp"
+#include "ramag/internal/centromere/gap_alignment.hpp"
+#include "ramag/internal/centromere/gap_alignment.hpp"
+#include "ramag/internal/centromere/gap_alignment.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>

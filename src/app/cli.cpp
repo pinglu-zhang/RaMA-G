@@ -1,8 +1,9 @@
-#include "app/cli.hpp"
+#include "ramag/internal/io.hpp"
+#include "ramag/internal/app/cli.hpp"
 #include "ramag/centromere_direction.hpp"
 #include "ramag/centromere_blocks.hpp"
 #include "ramag/pairwise_core.hpp"
-#include "index/sufkit_adapter.hpp"
+#include "ramag/internal/index.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1102,3 +1103,19 @@ std::string EffectiveIndexConfigText(const IndexSpec& spec) {
 }
 
 }  // namespace ramag
+
+namespace ramag {
+OutputPaths MakeOutputPaths(const RunSpec& spec) {
+  auto paths = MakeOutputPaths(spec.output_prefix);
+  for (const auto& request : spec.outputs) {
+    switch (request.format) {
+      case OutputFormat::Sam: paths.sam = request.path; break;
+      case OutputFormat::Paf: paths.paf = request.path; break;
+      case OutputFormat::Delta: paths.delta = request.path; break;
+      case OutputFormat::Maf: paths.maf = request.path; break;
+      case OutputFormat::Chain: paths.chain = request.path; break;
+    }
+  }
+  return paths;
+}
+}

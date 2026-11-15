@@ -23,11 +23,11 @@ foreach(_retired IN ITEMS
 endforeach()
 
 # Licensed fixed-end KSW2 and the selected main-path core are always built.
-add_library(ramag_pairwise STATIC src/genome/core/pairwise.cpp third_party/ksw2/ksw2_extz2_sse.c)
+add_library(ramag_pairwise STATIC src/genome/core.cpp src/genome/extension.cpp src/genome/linking.cpp third_party/ksw2/ksw2_extz2_sse.c)
 add_library(RaMAG::pairwise ALIAS ramag_pairwise)
 set_target_properties(ramag_pairwise PROPERTIES EXPORT_NAME pairwise POSITION_INDEPENDENT_CODE ON)
 target_compile_features(ramag_pairwise PUBLIC cxx_std_20)
-target_include_directories(ramag_pairwise PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2 ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(ramag_pairwise PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ksw2 ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(ramag_pairwise PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)

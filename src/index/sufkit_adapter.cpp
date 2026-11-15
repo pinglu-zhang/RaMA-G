@@ -1,7 +1,7 @@
-#include "index/sufkit_adapter.hpp"
+#include "ramag/internal/index.hpp"
 
-#include "io/fasta.hpp"
-#include "app/runtime.hpp"
+#include "ramag/internal/io.hpp"
+#include "ramag/internal/app/runtime.hpp"
 
 #include <algorithm>
 #include <array>

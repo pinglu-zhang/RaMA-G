@@ -1,5 +1,5 @@
-#include "common/centromere.hpp"
-#include "centromere/refinement/block_dp.hpp"
+#include "ramag/internal/common/centromere.hpp"
+#include "ramag/internal/centromere/gap_alignment.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>

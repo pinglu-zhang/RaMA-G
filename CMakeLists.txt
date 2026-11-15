@@ -137,13 +137,13 @@ if(RAMAG_ENABLE_PINNED_DEPENDENCIES AND OpenMP_C_FOUND)
 endif()
 
 add_library(ramag_core
-  src/genome/core/alignment.cpp
+  src/genome/alignment.cpp
   src/app/cli.cpp
   src/io/fasta.cpp
   src/app/pipeline.cpp
   src/index/reference_index.cpp
   src/app/runtime.cpp
-  src/app/logging.cpp
+
   src/index/sufkit_adapter.cpp
   src/io/writers.cpp)
 add_library(RaMA-G::core ALIAS ramag_core)
@@ -155,7 +155,7 @@ target_compile_features(ramag_core PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(ramag_core PRIVATE ZLIB::ZLIB Threads::Threads)
 include(cmake/RaMACentromere.cmake)
-target_include_directories(ramag_core PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(ramag_core PRIVATE "${PROJECT_SOURCE_DIR}/include")
 target_include_directories(ramag_core SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/spdlog/include ${PROJECT_SOURCE_DIR}/third_party/kseq)
 target_include_directories(
   ramag_core
@@ -207,7 +207,7 @@ endif()
 
 add_executable(ramag src/app/main.cpp)
 target_link_libraries(ramag PRIVATE RaMA-G::core)
-target_include_directories(ramag PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(ramag PRIVATE "${PROJECT_SOURCE_DIR}/include")
 ramag_apply_project_warnings(ramag)
 
 install(TARGETS ramag RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

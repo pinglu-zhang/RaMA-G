@@ -1,4 +1,4 @@
-#include "centromere/stitch/kernel.hpp"
+#include "ramag/internal/centromere/gap_alignment.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>

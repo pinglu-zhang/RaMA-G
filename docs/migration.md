@@ -39,3 +39,17 @@ The top-level benchmark harness is no longer part of the product tree. Historica
 source remains in Git history; research results and internal benchmark records
 are not rewritten or presented as new product measurements. Real-data benchmarks
 are not required for installation or public CI.
+
+## Stage-oriented source layout
+
+The ten supported public header names, library entry points and install targets
+are unchanged. Private headers have moved from `src` to
+`include/ramag/internal`; unsupported source-tree consumers must update their
+includes. Private headers are excluded from installation. Internal tests now
+link the compiled genome implementation instead of including its `.cpp` file.
+
+Related runtime, I/O, index and refinement declarations are consolidated.
+Direction diagnostic writers are separated from the algorithms, and the genome
+extension and main-path linker have independent translation units. The source
+reorganization does not introduce CLI options or change alignment defaults,
+scoring, tie order, resource limits or output coordinate/CIGAR contracts.
