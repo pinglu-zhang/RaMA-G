@@ -30,11 +30,15 @@ with tempfile.TemporaryDirectory(prefix='consumer-', dir=a.root) as d:
     assert not (prefix / 'include' / 'ramag' / 'internal').exists()
     first = commands_json[0]
     compiler = shlex.split(first['command'])[0] if 'command' in first else first['arguments'][0]
-    headers = sorted((prefix / 'include' / 'ramag').glob('*.hpp'))
-    assert len(headers) == 10, [header.name for header in headers]
+    headers = sorted((prefix / 'include' / 'ramag').rglob('*.hpp'))
+    expected_headers = {'alignment.hpp', 'model.hpp', 'pairwise_core.hpp',
+                        'centromere.hpp', 'centromere/direction.hpp',
+                        'centromere/anchors.hpp', 'centromere/stitch.hpp'}
+    header_root = prefix / 'include' / 'ramag'
+    assert {str(header.relative_to(header_root)) for header in headers} == expected_headers
     for header in headers:
         unit = root / ('standalone-' + header.stem + '.cpp')
-        unit.write_text('#include <ramag/' + header.name + '>\n')
+        unit.write_text('#include <ramag/' + str(header.relative_to(header_root)) + '>\n')
         cp = subprocess.run([compiler, '-std=c++20', '-fsyntax-only',
                              '-I' + str(prefix / 'include'), str(unit)],
                             text=True, capture_output=True, timeout=30)

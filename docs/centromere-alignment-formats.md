@@ -132,7 +132,7 @@ IDs and `sc` use SAM-compatible `Z` strings to avoid integer truncation. Standar
 
 ## Library interface and checks
 
-Include `ramag/centromere_stitch_formats.hpp`, link `RaMAG::centromere`, and call:
+Include `ramag/centromere/stitch.hpp`, link `RaMAG::centromere`, and call:
 
 ```cpp
 WriteCentromereStitchPaf(output, reference, query, stitched);

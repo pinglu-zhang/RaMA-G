@@ -1,5 +1,5 @@
-#include "ramag/internal/centromere/backend/wfa_memory.hpp"
-#include "ramag/internal/common/centromere.hpp"
+#include "ramag/internal/centromere/wfa_memory.hpp"
+#include "ramag/internal/centromere/support.hpp"
 #include <cstdlib>
 #include <new>
 #include <stdexcept>

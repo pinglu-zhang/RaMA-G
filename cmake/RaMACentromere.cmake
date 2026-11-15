@@ -194,24 +194,24 @@ if(RAMAG_CENTROMERE_DIRECTIONS AND NOT RAMAG_CENTROMERE_ANCHORS_ONLY)
   message(FATAL_ERROR "Direction evidence is anchors-only; enable RAMAG_CENTROMERE_ANCHORS_ONLY")
 endif()
 set(RAMAG_WFA2_SOURCE_DIR "" CACHE PATH "Clean pinned WFA2 source override")
-add_library(ramag_centromere STATIC src/centromere/backend/backend.cpp
-  src/centromere/direction/blocks.cpp
-  src/centromere/anchors/directed.cpp
-  src/centromere/copy/anchors.cpp
-  src/centromere/stitch/stitch.cpp
+add_library(ramag_centromere STATIC src/centromere/backend.cpp
+  src/centromere/direction.cpp
+  src/centromere/anchors.cpp
+  src/centromere/copy.cpp
+  src/centromere/stitch.cpp
 
-  src/centromere/refinement/endpoints.cpp
+  src/centromere/endpoints.cpp
 
-  src/centromere/refinement/cross_region.cpp
-  src/centromere/refinement/path.cpp
+  src/centromere/cross_region.cpp
+  src/centromere/paths.cpp
 
-  src/centromere/refinement/block_dp.cpp
+  src/centromere/block_dp.cpp
   src/centromere/output.cpp
-  src/centromere/stitch/kernel.cpp
-  src/centromere/direction/planner.cpp
-  src/centromere/direction/orientation.cpp
-  src/centromere/direction/review.cpp
-  src/centromere/direction/evidence.cpp
+  src/centromere/gap_kernel.cpp
+  src/centromere/planning.cpp
+  src/centromere/orientation.cpp
+  src/centromere/direction_review.cpp
+  src/centromere/evidence.cpp
     )
 add_library(RaMAG::centromere ALIAS ramag_centromere)
 target_compile_features(ramag_centromere PUBLIC cxx_std_20)
@@ -309,6 +309,11 @@ if(RAMAG_ENABLE_CENTROMERE)
     set(_wfa "${ramag_wfa2_SOURCE_DIR}")
     ramag_require_clean_commit("${_wfa}" "${_wfa_commit}" "WFA2")
   endif()
+  set(_rama_compat_include "${CMAKE_CURRENT_BINARY_DIR}/rama-compat")
+  file(MAKE_DIRECTORY "${_rama_compat_include}")
+  configure_file(
+    "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere/overlap.hpp"
+    "${_rama_compat_include}/centromere_overlap_compatibility.hpp" COPYONLY)
   add_library(ramag_rama_dependencies OBJECT
     third_party/rama/core/gsacak_guarded.cpp
     third_party/rama/core/rare_match.cpp
@@ -316,8 +321,8 @@ if(RAMAG_ENABLE_CENTROMERE)
     third_party/rama/core/anchor.cpp
   )
   target_compile_features(ramag_rama_dependencies PRIVATE cxx_std_20)
-  target_include_directories(ramag_rama_dependencies PRIVATE third_party/rama/core "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere")
-  target_include_directories(ramag_rama_dependencies PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
+  target_include_directories(ramag_rama_dependencies PRIVATE third_party/rama/core "${_rama_compat_include}")
+  target_include_directories(ramag_rama_dependencies PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_compile_definitions(ramag_rama_dependencies PRIVATE
     RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY=$<BOOL:${RAMAG_CENTROMERE_CHAIN_OVERLAP_COMPATIBILITY}>
     RAMAG_CENTROMERE_NODE_COVERAGE_GUARD=$<BOOL:${RAMAG_CENTROMERE_NODE_COVERAGE_GUARD}>
@@ -369,9 +374,9 @@ if(RAMAG_ENABLE_CENTROMERE)
   )
   target_include_directories(ramag_wfa_objects SYSTEM PRIVATE "${_wfa}" "${_wfa}/wavefront")
   target_compile_options(ramag_wfa_objects PRIVATE -fexceptions
-    -include "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere/backend/wfa_hooks.h")
+    -include "${PROJECT_SOURCE_DIR}/include/ramag/internal/centromere/wfa_hooks.h")
   set_target_properties(ramag_wfa_objects PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
-  target_sources(ramag_centromere PRIVATE src/centromere/backend/wfa_memory.cpp
+  target_sources(ramag_centromere PRIVATE src/centromere/wfa_memory.cpp
     $<TARGET_OBJECTS:ramag_rama_dependencies> $<TARGET_OBJECTS:ramag_wfa_objects>)
   target_include_directories(ramag_centromere SYSTEM PRIVATE third_party/rama/core "${_wfa}")
   target_compile_definitions(ramag_centromere PRIVATE RAMAG_HAVE_CENTROMERE=1)
@@ -397,7 +402,9 @@ install(TARGETS ramag_centromere EXPORT RaMAGCentromereTargets ARCHIVE DESTINATI
 install(EXPORT RaMAGCentromereTargets NAMESPACE RaMAG:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGCentromere)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RaMAGCentromereConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/RaMAGCentromereConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RaMAGCentromere)
-install(FILES include/ramag/centromere.hpp include/ramag/centromere_direction.hpp include/ramag/centromere_blocks.hpp include/ramag/centromere_directed_anchors.hpp include/ramag/centromere_copy_anchors.hpp include/ramag/centromere_stitch.hpp include/ramag/centromere_stitch_formats.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
+install(FILES include/ramag/centromere.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag)
+install(FILES include/ramag/centromere/direction.hpp include/ramag/centromere/anchors.hpp
+  include/ramag/centromere/stitch.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ramag/centromere)
 install(FILES third_party/rama/upstream/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/rama)
 if(RAMAG_ENABLE_CENTROMERE)
   install(FILES "${_wfa}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/ramag/third_party/wfa2)

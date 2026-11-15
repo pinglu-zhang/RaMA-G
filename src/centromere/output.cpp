@@ -1,12 +1,12 @@
-#include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere/direction.hpp"
 #include "ramag/internal/centromere/refinement.hpp"
 #include <iomanip>
 #include <limits>
 #include <ostream>
 #include <sstream>
-#include "ramag/centromere_direction.hpp"
-#include "ramag/internal/common/centromere.hpp"
-#include "ramag/centromere_stitch_formats.hpp"
+#include "ramag/centromere/direction.hpp"
+#include "ramag/internal/centromere/support.hpp"
+#include "ramag/centromere/stitch.hpp"
 #include <algorithm>
 #include <iterator>
 #include <map>

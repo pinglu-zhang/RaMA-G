@@ -1,7 +1,8 @@
 # C++ libraries
 
-Install the project before compiling a consumer. Public include paths and CMake
-package names for retained capabilities remain stable. Headers private to the
+Install the project before compiling a consumer. CMake package and target names
+remain stable. Consolidated centromere include paths are listed in
+[migration](migration.md). Headers private to the
 CLI, workflow orchestration or review implementation are not installed APIs.
 
 ## Pairwise library
@@ -39,6 +40,18 @@ choice. Optional vacant/chain recovery interfaces have been removed; see
 find_package(RaMAGCentromere CONFIG REQUIRED)
 target_link_libraries(my-alignment PRIVATE RaMAG::centromere)
 ```
+
+Include the functional header needed by the consumer:
+
+```cpp
+#include <ramag/centromere.hpp>
+#include <ramag/centromere/direction.hpp>
+#include <ramag/centromere/anchors.hpp>
+#include <ramag/centromere/stitch.hpp>
+```
+
+Direction evidence/planning, primary/copy anchors and stitching/format export
+are grouped respectively in the three short headers above.
 
 Installed headers provide source-derived RaMA anchors, direction evidence,
 directed recursive anchors, copy relationships, path stitching and format APIs.

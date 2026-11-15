@@ -1,14 +1,14 @@
 #pragma once
-#include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere/direction.hpp"
 #include <algorithm>
 #include <memory_resource>
 #include <span>
 #include <vector>
-#include "ramag/centromere_direction.hpp"
+#include "ramag/centromere/direction.hpp"
 #include <unordered_map>
 #include <tuple>
-#include "ramag/internal/centromere/centromere_overlap_compatibility.hpp"
-#include "ramag/internal/common/centromere.hpp"
+#include "ramag/internal/centromere/overlap.hpp"
+#include "ramag/internal/centromere/support.hpp"
 #include <limits>
 
 

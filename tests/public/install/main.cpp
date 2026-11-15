@@ -1,11 +1,11 @@
 #include <ramag/pairwise_core.hpp>
 #include <ramag/centromere.hpp>
-#include <ramag/centromere_direction.hpp>
-#include <ramag/centromere_blocks.hpp>
-#include <ramag/centromere_directed_anchors.hpp>
-#include <ramag/centromere_copy_anchors.hpp>
-#include <ramag/centromere_stitch.hpp>
-#include <ramag/centromere_stitch_formats.hpp>
+#include <ramag/centromere/direction.hpp>
+#include <ramag/centromere/direction.hpp>
+#include <ramag/centromere/anchors.hpp>
+#include <ramag/centromere/anchors.hpp>
+#include <ramag/centromere/stitch.hpp>
+#include <ramag/centromere/stitch.hpp>
 #include <iostream>
 
 int main() {

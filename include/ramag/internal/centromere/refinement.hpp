@@ -1,5 +1,5 @@
 #pragma once
-#include "ramag/centromere_stitch.hpp"
+#include "ramag/centromere/stitch.hpp"
 #include <optional>
 #include <chrono>
 #include <set>

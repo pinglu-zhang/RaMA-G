@@ -1,7 +1,7 @@
 #include "ramag/internal/io.hpp"
 #include "ramag/internal/app/cli.hpp"
-#include "ramag/centromere_direction.hpp"
-#include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere/direction.hpp"
+#include "ramag/centromere/direction.hpp"
 #include "ramag/pairwise_core.hpp"
 #include "ramag/internal/index.hpp"
 

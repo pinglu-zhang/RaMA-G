@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere/direction.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>

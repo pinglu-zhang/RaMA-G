@@ -3,7 +3,8 @@
 ## Source map
 
 Project headers live under `include`; implementation files live under `src`.
-The ten existing `include/ramag/*.hpp` paths remain the supported public API.
+The public API has seven headers: four entry/model headers under `include/ramag/`
+and three functional headers under `include/ramag/centromere/`.
 `include/ramag/internal/` contains private declarations and required templates;
 it is shipped with source packages but is never installed or used by public headers.
 
@@ -15,8 +16,7 @@ src/io/                    FASTA input and common format writers
 src/index/                 reference-index persistence and Sufkit adaptation
 src/genome/                alignment orchestration, core chaining/selection,
                            KSW2 extension and bounded main-path linking
-src/centromere/            backend, direction, anchors, copies, stitching,
-                           refinement and consolidated result writers
+src/centromere/            flat implementation directory; no child directories
 third_party/               pinned dependencies, licenses and source attribution
 ```
 
@@ -33,10 +33,24 @@ file is textually included by another source file or test. Ordinary review entry
 points are compiled once; callback-dependent search visitors retain statically
 typed templates without runtime type erasure or extra data copies.
 
-The small `centromere_overlap_compatibility.hpp` header remains separate because
-the pinned RaMA sources include that exact name. Its include directory is private
-to the dependency build. This preserves the third-party source and license files.
-Genome HOXD70 and centromere three-piece kernels remain separate scoring models.
+Centromere implementations use short, unique stage names in one directory:
+`anchors.cpp`, `backend.cpp`, `block_dp.cpp`, `copy.cpp`, `cross_region.cpp`,
+`direction.cpp`, `direction_review.cpp`, `endpoints.cpp`, `evidence.cpp`,
+`gap_kernel.cpp`, `orientation.cpp`, `output.cpp`, `paths.cpp`, `planning.cpp`,
+`stitch.cpp` and `wfa_memory.cpp`. Private centromere headers are also flat under
+`include/ramag/internal/centromere/`.
+
+The public headers group direction evidence and planning in `direction.hpp`,
+primary/copy anchors in `anchors.hpp`, and gap stitching/format export in
+`stitch.hpp`. The base `ramag/centromere.hpp` entry is retained. See the exact
+include-path mapping in [migration](migration.md). No old forwarding headers
+are kept.
+
+The pinned RaMA source requires a fixed compatibility include name. CMake copies
+private `overlap.hpp` into its binary directory under that required name; the
+source tree has no duplicate or forwarding file. This name adaptation does not
+change or replace any third-party source. Genome HOXD70 and centromere
+three-piece kernels remain separate scoring models.
 
 Public headers must be self-contained and must not include private headers.
 I/O and seed-index declarations do not include the CLI parser. Application-only

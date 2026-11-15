@@ -1,6 +1,6 @@
 #pragma once
 #include "ramag/centromere.hpp"
-#include "ramag/centromere_blocks.hpp"
+#include "ramag/centromere/direction.hpp"
 namespace ramag::detail {
 // Exact-anchor algorithms deliberately accept uppercase canonical bases only.
 // FASTA validation has a separate, more permissive input-character contract.

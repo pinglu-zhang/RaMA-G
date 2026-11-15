@@ -1,5 +1,5 @@
 #pragma once
-#include "ramag/centromere_stitch.hpp"
+#include "ramag/centromere/stitch.hpp"
 #include "ramag/alignment.hpp"
 #include <span>
 #include <string_view>

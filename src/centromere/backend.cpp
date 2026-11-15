@@ -8,7 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
-#include "ramag/internal/common/centromere.hpp"
+#include "ramag/internal/centromere/support.hpp"
 #include <chrono>
 #include <climits>
 #include <exception>
@@ -155,7 +155,7 @@ void RequireCentromereBackend(const CentromereSpec& spec) {
 
 #if RAMAG_HAVE_CENTROMERE
 #include "anchor.h"
-#include "ramag/internal/centromere/backend/wfa_memory.hpp"
+#include "ramag/internal/centromere/wfa_memory.hpp"
 extern "C" {
 #include "wavefront/wavefront_align.h"
 }

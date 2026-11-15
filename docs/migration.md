@@ -30,8 +30,8 @@ path linker, its normal work cap and centromere resource limits are unchanged.
 
 The product keeps basic candidate/unlinked/linked library selection and
 centromere direction, anchor, copy, stitch and format APIs. Private workflow and
-review headers have moved into source modules; do not include them from an
-external consumer. Supported installed public include paths remain unchanged.
+review headers are private; do not include them from an external consumer.
+The consolidated public include paths are listed below.
 
 ## Research scripts and evidence
 
@@ -42,8 +42,8 @@ are not required for installation or public CI.
 
 ## Stage-oriented source layout
 
-The ten supported public header names, library entry points and install targets
-are unchanged. Private headers have moved from `src` to
+Library entry points and install targets retain their names. Public headers
+are consolidated as described below. Private headers have moved from `src` to
 `include/ramag/internal`; unsupported source-tree consumers must update their
 includes. Private headers are excluded from installation. Internal tests now
 link the compiled genome implementation instead of including its `.cpp` file.
@@ -53,3 +53,24 @@ Direction diagnostic writers are separated from the algorithms, and the genome
 extension and main-path linker have independent translation units. The source
 reorganization does not introduce CLI options or change alignment defaults,
 scoring, tie order, resource limits or output coordinate/CIGAR contracts.
+
+## Consolidated centromere headers
+
+Update source includes using this table. Function names, type names, CMake
+package/target names and CLI behavior are unchanged. Old include paths are
+removed without forwarding headers; consumers must update includes and rebuild.
+
+| Previous include | Current include |
+|---|---|
+| `ramag/centromere_direction.hpp` | `ramag/centromere/direction.hpp` |
+| `ramag/centromere_blocks.hpp` | `ramag/centromere/direction.hpp` |
+| `ramag/centromere_directed_anchors.hpp` | `ramag/centromere/anchors.hpp` |
+| `ramag/centromere_copy_anchors.hpp` | `ramag/centromere/anchors.hpp` |
+| `ramag/centromere_stitch.hpp` | `ramag/centromere/stitch.hpp` |
+| `ramag/centromere_stitch_formats.hpp` | `ramag/centromere/stitch.hpp` |
+
+`ramag/centromere.hpp`, `ramag/model.hpp`, `ramag/alignment.hpp` and
+`ramag/pairwise_core.hpp` retain their existing paths. Centromere implementation
+files now sit directly in `src/centromere/`; its former stage subdirectories
+have been removed. Private headers use matching short functional names, with
+no installed private or compatibility files.

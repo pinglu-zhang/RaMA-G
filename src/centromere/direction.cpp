@@ -1,5 +1,5 @@
-#include "ramag/centromere_blocks.hpp"
-#include "ramag/internal/common/centromere.hpp"
+#include "ramag/centromere/direction.hpp"
+#include "ramag/internal/centromere/support.hpp"
 #include "ramag/internal/centromere/placement_review.hpp"
 #include "ramag/internal/centromere/gap_review.hpp"
 #include "ramag/internal/centromere/evidence_review.hpp"

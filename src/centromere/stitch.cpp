@@ -1,5 +1,5 @@
-#include "ramag/internal/common/centromere.hpp"
-#include "ramag/centromere_stitch.hpp"
+#include "ramag/internal/centromere/support.hpp"
+#include "ramag/centromere/stitch.hpp"
 #include "ramag/internal/centromere/gap_alignment.hpp"
 #include "ramag/internal/centromere/gap_alignment.hpp"
 

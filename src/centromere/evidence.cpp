@@ -1,4 +1,4 @@
-#include "ramag/centromere_direction.hpp"
+#include "ramag/centromere/direction.hpp"
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -8,7 +8,7 @@
 #include <tuple>
 #include <sstream>
 #include "ramag/internal/centromere/direction.hpp"
-#include "ramag/internal/common/centromere.hpp"
+#include "ramag/internal/centromere/support.hpp"
 #if RAMAG_HAVE_CENTROMERE
 #include "anchor.h"
 #endif
