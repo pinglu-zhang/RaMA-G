@@ -5,6 +5,26 @@ centromere pairs. It reads plain or gzip FASTA and writes base-level alignments.
 
 ## Install
 
+### Conda (recommended)
+
+Install the Linux x86-64 package from [malab](https://anaconda.org/malab/rama-g):
+
+```bash
+conda create -n ramag --override-channels \
+  -c malab -c conda-forge rama-g=0.1.1
+conda activate ramag
+ramag --version
+ramag align --help
+```
+
+The package includes the complete centromere backend and requires **glibc 2.17
+or newer and SSE4.2**. Conda supplies the C++ runtime, OpenMP and zlib; a compiler
+and Python are not needed to run RaMA-G. Example inputs are installed under
+`$CONDA_PREFIX/share/ramag/examples`. In the examples below, Conda users can
+replace `./build/release/ramag` with `ramag` and use the installed input paths.
+
+### Build from source
+
 Supported platform: **Linux x86-64 with SSE4.2**. Build requirements are a
 C++20/C11 compiler, CMake 3.22+, Git, zlib, OpenMP, and Make or Ninja.
 On Ubuntu 24.04:

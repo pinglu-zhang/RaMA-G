@@ -1,0 +1,70 @@
+{% set name = "rama-g" %}
+{% set version = "0.1.1" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  - git_url: https://github.com/pinglu-zhang/RaMA-G.git
+    git_rev: be2baaac42cb068c9c10dca515d2b1c8c2decbb2
+    folder: rama-g
+  - git_url: https://github.com/malabz/sufkit.git
+    git_rev: 028075e6f2d622fcbdcf76b153bbde0f069ca64f
+    folder: sufkit
+  - git_url: https://github.com/smarco/WFA2-lib.git
+    git_rev: 99a5879a3a2972eff168cbcc6610b6cf02844ed0
+    folder: wfa2
+
+build:
+  number: 1
+  skip: true  # [not linux64]
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - {{ stdlib('c') }}
+    - cmake >=3.22,<4
+    - ninja
+    - git
+    - python 3.11.*
+    - binutils
+    - patchelf
+  host:
+    - zlib
+    - libgomp
+  run:
+    - libgomp
+    - zlib
+
+test:
+  requires:
+    - python 3.11.*
+    - binutils
+  source_files:
+    - rama-g/tests/public/test_cli.py
+    - rama-g/tests/public/test_formats.py
+    - rama-g/tests/public/test_centromere.py
+
+about:
+  home: https://github.com/pinglu-zhang/RaMA-G
+  license: MIT AND Apache-2.0 AND BSD-3-Clause
+  license_file:
+    - rama-g/LICENSE
+    - rama-g/third_party/rama/LICENSE
+    - rama-g/third_party/ksw2/LICENSE
+    - rama-g/third_party/spdlog/LICENSE
+    - rama-g/third_party/centrolign_stitch/LICENSE
+    - sufkit/LICENSE
+    - sufkit/third_party/parlaylib/LICENSE
+    - sufkit/third_party/caps-sa/LICENSE
+    - sufkit/third_party/libdivsufsort/LICENSE
+    - sufkit/third_party/sdsl/LICENSE
+    - wfa2/LICENSE
+  summary: Pairwise whole-genome and centromere assembly alignment
+  description: |
+    RaMA-G writes SAM, PAF, MAF, delta and chain alignments.
+    The complete centromere backend is included. Linux x86-64 CPUs must
+    support SSE4.2; glibc 2.17 or newer is required. No external aligner
+    or Python interpreter is needed at runtime.

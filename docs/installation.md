@@ -39,7 +39,8 @@ cmake --build --preset genome-only --parallel 4
 
 Genome-only supports `align`, `index` and `batch`. It still requires Sufkit;
 `align -c` reports an unavailable backend. Use a separate build directory for
-each configuration. No Conda, pip or prebuilt binary distribution is provided.
+each configuration. The complete Linux-64 package is also available from the
+`malab` Conda channel; see below. No pip distribution is provided.
 
 ## Install
 
@@ -86,3 +87,52 @@ ctest --preset testing --output-on-failure --no-tests=error
 
 These tests use no real genomes or benchmark downloads. See
 [troubleshooting](troubleshooting.md) if a build, dependency check or run fails.
+
+## Conda package
+
+The Linux-64 recipe in `recipe/` builds the full program, including the
+centromere backend. It targets glibc 2.17 or newer and x86-64 CPUs with SSE4.2.
+It does not use `-march=native` or require AVX. Conda supplies the C++ and OpenMP
+runtime libraries and zlib; Python is not a program runtime dependency.
+The Conda installation itself must also support the host operating system.
+For a new Conda installation, consult the official
+[Miniforge requirements](https://github.com/conda-forge/miniforge#requirements-and-installers),
+which list glibc 2.17 support for Linux x86-64.
+
+Install from the public [malab channel](https://anaconda.org/malab/rama-g):
+
+```bash
+conda create -n ramag --override-channels \
+  -c malab -c conda-forge rama-g=0.1.1
+conda activate ramag
+ramag --version
+ramag align --help
+```
+
+Use a new environment so Conda can resolve the runtime dependencies. Avoid
+`conda install --no-deps` and do not replace system glibc libraries. Small example
+inputs are installed in `$CONDA_PREFIX/share/ramag/examples`; call `ramag`
+instead of `./build/release/ramag` when following the source-build examples.
+
+For example, run an alignment from any writable working directory:
+
+```bash
+ramag align \
+  --reference "$CONDA_PREFIX/share/ramag/examples/genome/reference.fa" \
+  --query "$CONDA_PREFIX/share/ramag/examples/genome/query.fa" \
+  --output results/conda-first.paf --work-dir results/conda-first-work --threads 2
+```
+
+If you received a local `.conda` file, you can install its absolute path in place
+of `rama-g=0.1.1` with `-c conda-forge` for its dependencies.
+
+To build the local package with Conda Build:
+
+```bash
+conda build recipe --override-channels -c conda-forge --no-anaconda-upload
+```
+
+The recipe pins the RaMA-G source, Sufkit and WFA2 revisions and a glibc 2.17
+sysroot. Building requires network access to fetch the pinned sources and
+Conda dependencies. Package construction runs the synthetic public tests;
+`--no-anaconda-upload` keeps the package local.
